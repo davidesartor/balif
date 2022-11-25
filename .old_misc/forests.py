@@ -1,6 +1,6 @@
 import numpy as np
-from numba import njit, vectorize, prange
-
+from numba import njit, vectorize
+from joblib import Parallel, delayed
 
 @vectorize
 def c_norm(k):
@@ -9,10 +9,10 @@ def c_norm(k):
     return 2*h_k-2*(k-1)/k
 
 
-@njit(parallel=True)
+@njit
 def get_leaf_ids(X, child_left, child_right, normals, intercepts):
         res = np.zeros(len(X),dtype=np.int16)
-        for i in prange(len(X)):
+        for i in range(len(X)):
             node_id = 0
             while child_left[node_id] or child_right[node_id]:
                 if np.dot(X[i],normals[node_id]) <= intercepts[node_id]:
@@ -24,15 +24,11 @@ def get_leaf_ids(X, child_left, child_right, normals, intercepts):
     
 
 class ExtendedTree():
-    def __init__(self, X, locked_dims=None):
-        self.locked_dims=locked_dims
-        self.fit(X)
+    def __init__(self, X, cut_dimension=None, random_state=None, normalization=None):
+        self.random_seed = random_state
+        self.fit(X, cut_dimension)
         
-    def fit(self,X):
-        self.psi = len(X)
-        self.d = X.shape[1]
-        self.max_depth = np.log2(self.psi)
-        
+    def initialize_tree(self):
         self.child_left = np.zeros(2*self.psi, dtype=int)
         self.child_right = np.zeros(2*self.psi, dtype=int)
         self.normals = np.zeros((2*self.psi,self.d), dtype=float)
@@ -44,8 +40,17 @@ class ExtendedTree():
         self.node_count = 1
         self.path_to[0] = [0]
         
+    def fit(self, X, cut_dimension=None):
+        self.psi = len(X)
+        self.d = X.shape[1]
+        self.cut_dimension = cut_dimension or self.d
+        self.max_depth = np.log2(self.psi)
+        
+        self.initialize_tree()
         self.extend_tree(node_id=0, X=X, depth=0)
         self.corrected_depth = (c_norm(self.node_size)+self.depth)/c_norm(self.psi)
+        self.correction_factor = c_norm(self.psi)
+        self.depthrange = (np.min(self.corrected_depth[:self.node_count]),np.max(self.corrected_depth[:self.node_count]))
         
     def create_new_node(self, parent_id):
         new_node_id = self.node_count
@@ -55,43 +60,31 @@ class ExtendedTree():
         return new_node_id
     
     def sample_normal_vector(self):
-        # sample random d dimensinal vector 
-        normals = np.random.randn(self.d)
+        normals = np.zeros(self.d)
+        selected_dims = np.random.choice(np.arange(self.d), size=self.cut_dimension, replace=False)
+        normals[selected_dims] = np.random.randn(self.cut_dimension)
+        return normals 
+    
+    def make_random_cut(self, node_id, X):
+         # sample random normal vector
+        self.normals[node_id] = self.sample_normal_vector()            
+        # compute distances from plane (intercept in origin)
+        dist = np.dot(X, self.normals[node_id])
+        # sample intercept 
+        self.intercepts[node_id] = np.random.uniform(np.min(dist),np.max(dist))
+        # split condition for  X
+        cond = dist <= self.intercepts[node_id]
+        return X[cond==True], X[cond==False]
         
-        # align the hyperplane to one of the locked dimensions, fix norm to remove bias
-        if self.locked_dims is not None:
-            locked = normals[self.locked_dims]
-            selected_one = np.argmax(locked) 
-            excess_norm = np.sqrt(np.sum(np.square(locked)))
-            locked = np.zeros_like(locked)
-            locked[selected_one] = excess_norm
-            normals[self.locked_dims] = locked
-        
-        return normals        
-        
-    def extend_tree(self,node_id, X, depth):
+    def extend_tree(self, node_id, X, depth):
         self.node_size[node_id] = len(X)
-        
         if depth >= self.max_depth or len(X)<=1:
             return
         
-        # sample random normal vector
-        self.normals[node_id] = self.sample_normal_vector()            
-        
-        # compute distances from plane (intercept in origin)
-        dist = np.dot(X, self.normals[node_id])
-        
-        # sample intercept 
-        self.intercepts[node_id] = np.random.uniform(np.min(dist),np.max(dist))
-        
-        # split X
-        X_left = X[dist <= self.intercepts[node_id]]
-        X_right = X[dist > self.intercepts[node_id]]        
-        
+        X_left, X_right = self.make_random_cut(node_id, X)
         # add children 
         self.child_left[node_id] = self.create_new_node(node_id)
         self.child_right[node_id] = self.create_new_node(node_id)
-        
         # recurse on children
         self.extend_tree(self.child_left[node_id], X_left, depth+1)        
         self.extend_tree(self.child_right[node_id], X_right, depth+1)
@@ -107,24 +100,37 @@ class ExtendedTree():
     
 
 class ExtendedIsolationForest():
-    def __init__(self, n_estimators=100, max_samples="auto"):
+    def __init__(self, n_estimators=100, max_samples="auto", cut_dimension=None):
         self.n_estimators = n_estimators
         self.max_samples = 256 if max_samples == "auto" else max_samples
         self.c_norm = c_norm(self.max_samples)
+        self.cut_dimension = cut_dimension
         
-    def fit(self, X, locked_dims=None):
-        if locked_dims == "all": locked_dims = np.ones(X.shape[1],dtype=bool)
-        subsample_size = np.min((self.max_samples,len(X)))
+    def fit(self, X, seed=None):
+        samplesize = np.min((self.max_samples,len(X)))
+        
         self.trees = [
-            ExtendedTree(X[np.random.randint(len(X), size=subsample_size)], locked_dims=locked_dims) 
+            ExtendedTree(
+                X[np.random.randint(len(X), size=samplesize)], 
+                self.cut_dimension, 
+                random_state=seed,
+            ) 
             for _ in range(self.n_estimators)
         ]
         
     def predict(self, X):
-        return np.power(2,-np.mean([tree.predict(X) for tree in self.trees], axis=0))
+        depths = Parallel(n_jobs=8)(
+            delayed(lambda tree: tree.predict(X))(tree)
+            for tree in self.trees
+        )
+        return np.power(2,-np.mean(depths, axis=0))
     
     
 class IsolationForest(ExtendedIsolationForest):       
-    def fit(self, X, locked_dims=None):
-        super().fit(X,locked_dims="all")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, cut_dimension=1, **kwargs)
+        
+
+
+        
     
