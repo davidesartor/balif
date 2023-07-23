@@ -1,9 +1,13 @@
+import pickle
+import zlib
 from numpy.typing import NDArray
 from typing import Optional, Protocol, runtime_checkable
 
 import numpy as np
 from sklearn.metrics import average_precision_score
+from tqdm.notebook import tqdm
 
+from .datasets import load_as_train_test
 from .plotting import heatmap_2d
 
 
@@ -24,7 +28,7 @@ class UpdatableModel(Protocol):
         ...
 
 
-def run_sim(
+def simulate_run(
     model: UpdatableModel,
     n_iter: int,
     data_train: NDArray[np.float64],
@@ -39,28 +43,36 @@ def run_sim(
     use test data to evaluate model performance."""
     if labels_test is None:
         labels_test = labels_train
+    if data_test is None:
+        data_test = data_train
 
-    sim_results = {"true_labels": labels_test}
+    sim_results = {
+        "n_iter": n_iter,
+        "train": {"data": data_train, "labels": labels_train},
+        "test": {"data": data_test, "labels": labels_test},
+    }
+
     is_queried = np.zeros(data_train.shape[0], dtype=bool)
-    for iter in range(n_iter):
+    for iter in range(n_iter + 1):
         if iter == 0:
             model.fit(data_train, seed=seed)
         else:
             query_priority = np.argsort(model.predict(data_train))[::-1]
-            #first index of query_priority that is not yet queried
-            query_idx = 0 # reduntant, but avoids needing multiple type ignore for mypy
+            # first index of query_priority that is not yet queried
+            query_idx = 0  # reduntant, but avoids needing multiple type ignore for mypy
             for query_idx in query_priority:
                 if is_queried[query_idx] == False:
                     break
             if labels_train[query_idx] == 1:
-                model.update(outlier_data=data_train[query_idx]) 
+                model.update(outlier_data=data_train[query_idx])
             else:
-                model.update(inlier_data=data_train[query_idx]) 
+                model.update(inlier_data=data_train[query_idx])
             is_queried[query_idx] = True
 
+        queried_data = data_train[is_queried == True]
+        queried_labels = labels_train[is_queried == True]
+
         if show_heatmap_evol and iter % 5 == 0:
-            queried_data = data_train[is_queried == True]
-            queried_labels = labels_train[is_queried == True]
             heatmap_2d(
                 model,
                 title=f"iter {iter}",
@@ -69,14 +81,48 @@ def run_sim(
             )
 
         scores_train = model.predict(data_train)
-        if data_test is not None:
-            scores_test = model.predict(data_test)
-        else:
-            scores_test = scores_train
-    
-        average_precision_test = average_precision_score(labels_test, scores_test)
+        scores_test = model.predict(data_test)
+        ap_train = average_precision_score(labels_train, scores_train)
+        ap_test = average_precision_score(labels_test, scores_test)
 
-        sim_results[f"scores_{iter}_queries"] = scores_test
-        sim_results[f"AP_{iter}_queries"] = np.array(average_precision_test)
+        sim_results["train"][f"after_{iter}_queries"] = {
+            "scores": scores_train,
+            "ap": ap_train,
+            "queried_data": queried_data,
+            "queried_labels": queried_labels,
+        }
+        sim_results["test"][f"after_{iter}_queries"] = {
+            "scores": scores_test,
+            "ap": ap_test,
+        }
 
     return sim_results
+
+
+def multi_run_simulation(
+    model: UpdatableModel,
+    n_runs: int,
+    n_iter: int,
+    dataset_name: str,
+    test_size=0.33,
+    save_path: Optional[str] = None,
+):
+    sim_res = {}
+    for run_idx in tqdm(range(n_runs), leave=False):
+        data_train, data_test, labels_train, labels_test = load_as_train_test(
+            dataset_name=dataset_name, random_state=run_idx, test_size=test_size
+        )
+        sim_res[f"run_{run_idx}"] = simulate_run(
+            model=model,
+            n_iter=n_iter,
+            data_train=data_train,
+            labels_train=labels_train,
+            data_test=data_test,
+            labels_test=labels_test,
+        )
+
+    if save_path is None:
+        save_path = "sim_res.gz"
+
+    with open(save_path, "wb") as fp:
+        fp.write(zlib.compress(pickle.dumps(sim_res, pickle.HIGHEST_PROTOCOL), 9))
