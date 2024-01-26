@@ -1,128 +1,51 @@
-import pickle
-import zlib
 from numpy.typing import NDArray
-from typing import Optional, Protocol, runtime_checkable
-
 import numpy as np
-from sklearn.metrics import average_precision_score
-from tqdm.notebook import tqdm
-
-from .datasets import load_as_train_test
-from .plotting import heatmap_2d
+from sklearn.metrics import precision_recall_curve
 
 
-@runtime_checkable
-class UpdatableModel(Protocol):
-    def fit(self, data: NDArray[np.float64], seed: Optional[int] = None) -> None:
-        ...
-
-    def predict(self, data: NDArray[np.float64]) -> NDArray[np.float64]:
-        ...
-
-    def update(
-        self,
-        *args,
-        inlier_data: Optional[NDArray[np.float64]] = None,
-        outlier_data: Optional[NDArray[np.float64]] = None,
-    ) -> None:
-        ...
+def extract_ap_matrix(sim_results) -> NDArray[np.float64]:
+    """return matrix of average precision for each run and iteration"""
+    ap_matrix = [
+        [
+            run_res["test"][f"after_{iter}_queries"]["ap"]
+            for iter in range(run_res["n_iter"] + 1)
+        ]
+        for run_idx, run_res in sim_results.items()
+    ]
+    return np.array(ap_matrix)
 
 
-def simulate_run(
-    model: UpdatableModel,
-    n_iter: int,
-    data_train: NDArray[np.float64],
-    labels_train: NDArray[np.float64],
-    data_test: Optional[NDArray[np.float64]] = None,
-    labels_test: Optional[NDArray[np.float64]] = None,
-    seed: Optional[int] = None,
-    show_heatmap_evol: bool = False,
-):
-    """fit model using only train_data and train_labels, then iteratively update model.
-    queries use the "most anomalous" strategy and only consider points in training_data.
-    use test data to evaluate model performance."""
-    if labels_test is None:
-        labels_test = labels_train
-    if data_test is None:
-        data_test = data_train
-
-    sim_results = {
-        "n_iter": n_iter,
-        "train": {"data": data_train, "labels": labels_train},
-        "test": {"data": data_test, "labels": labels_test},
-    }
-
-    is_queried = np.zeros(data_train.shape[0], dtype=bool)
-    for iter in range(n_iter + 1):
-        if iter == 0:
-            model.fit(data_train, seed=seed)
-        else:
-            query_priority = np.argsort(model.predict(data_train))[::-1]
-            # first index of query_priority that is not yet queried
-            query_idx = 0  # reduntant, but avoids needing multiple type ignore for mypy
-            for query_idx in query_priority:
-                if is_queried[query_idx] == False:
-                    break
-            if labels_train[query_idx] == 1:
-                model.update(outlier_data=data_train[query_idx])
-            else:
-                model.update(inlier_data=data_train[query_idx])
-            is_queried[query_idx] = True
-
-        queried_data = data_train[is_queried == True]
-        queried_labels = labels_train[is_queried == True]
-
-        if show_heatmap_evol and iter % 5 == 0:
-            heatmap_2d(
-                model,
-                title=f"iter {iter}",
-                marked_outliers=queried_data[queried_labels == 1],
-                marked_inliers=queried_data[queried_labels == 0],
-            )
-
-        scores_train = model.predict(data_train)
-        scores_test = model.predict(data_test)
-        ap_train = average_precision_score(labels_train, scores_train)
-        ap_test = average_precision_score(labels_test, scores_test)
-
-        sim_results["train"][f"after_{iter}_queries"] = {
-            "scores": scores_train,
-            "ap": ap_train,
-            "queried_data": queried_data,
-            "queried_labels": queried_labels,
-        }
-        sim_results["test"][f"after_{iter}_queries"] = {
-            "scores": scores_test,
-            "ap": ap_test,
-        }
-
-    return sim_results
+def extract_scores_matrix(sim_results) -> NDArray[np.float64]:
+    """return matrix of model scores for each run and iteration"""
+    score_matrix = [
+        [
+            run_res["test"][f"after_{iter}_queries"]["scores"]
+            for iter in range(run_res["n_iter"] + 1)
+        ]
+        for run_idx, run_res in sim_results.items()
+    ]
+    return np.array(score_matrix)
 
 
-def multi_run_simulation(
-    model: UpdatableModel,
-    n_runs: int,
-    n_iter: int,
-    dataset_name: str,
-    test_size=0.33,
-    save_path: Optional[str] = None,
-):
-    sim_res = {}
-    for run_idx in tqdm(range(n_runs), leave=False):
-        data_train, data_test, labels_train, labels_test = load_as_train_test(
-            dataset_name=dataset_name, random_state=run_idx, test_size=test_size
-        )
-        sim_res[f"run_{run_idx}"] = simulate_run(
-            model=model,
-            n_iter=n_iter,
-            data_train=data_train,
-            labels_train=labels_train,
-            data_test=data_test,
-            labels_test=labels_test,
-        )
+def extract_label_matrix(sim_results) -> NDArray[np.float64]:
+    """return matrix of labels for each run and iteration"""
+    label_matrix = [
+        run_res["test"][f"labels"]
+        for run_idx, run_res in sim_results.items()
+    ]
+    return np.array(label_matrix)
 
-    if save_path is None:
-        save_path = "sim_res.gz"
 
-    with open(save_path, "wb") as fp:
-        fp.write(zlib.compress(pickle.dumps(sim_res, pickle.HIGHEST_PROTOCOL), 9))
+def extract_fbeta_matrix(sim_results, beta=1.0) -> NDArray[np.float64]:
+    """return matrix of maximum f1 scores for each run and iteration"""
+    def max_fbeta(labels, scores, beta=1.0):
+        precision, recall, _ = precision_recall_curve(labels, scores)
+        return max(np.divide((1+beta**2)*recall*precision, recall+beta**2*precision+1e-8))
+
+    score_matrix = extract_scores_matrix(sim_results)
+    label_matrix = extract_label_matrix(sim_results)
+
+    f1_matrix = [[max_fbeta(run_labels, iteration_scores, beta) for iteration_scores in run_scores]
+                 for run_labels, run_scores in zip(label_matrix, score_matrix)]
+    return np.array(f1_matrix)
+
