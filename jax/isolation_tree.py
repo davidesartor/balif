@@ -1,5 +1,5 @@
-from typing_extensions import Self
-from typing import NamedTuple
+from functools import partial
+from flax import struct
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,30 +24,26 @@ def sample_intercept(rng: jax.Array, distances: jax.Array, mask: jax.Array):
     return intercept
 
 
-class IsolationTree(NamedTuple):
-    node_sizes: jax.Array
+class IsolationTree(struct.PyTreeNode):
     normals: jax.Array
     intercepts: jax.Array
+    node_sizes: jax.Array
 
-    @property
-    def max_depth(self) -> int:
-        return int(np.log2(self.intercepts.shape[-1] + 1) - 1)
-
+    @jax.jit
     def path(self, point: jax.Array) -> jax.Array:
         def scan_body(id, x):
             distance = jnp.dot(self.normals[id], point) - self.intercepts[id]
             child = jax.lax.select(distance >= 0, 2 * id + 1, 2 * id + 2)
             return child, id
 
+        max_depth = int(np.log2(self.intercepts.shape[-1] + 1) - 1)
         root = jnp.zeros((), dtype=int)
-        leaf, path = jax.lax.scan(scan_body, root, None, length=self.max_depth - 1)
+        leaf, path = jax.lax.scan(scan_body, root, None, length=max_depth - 1)
         return jnp.concatenate((path, leaf[None,]))
 
-    def path_sizes(self, point: jax.Array) -> jax.Array:
-        return self.node_sizes[self.path(point)]
-
     @classmethod
-    def fit(cls, rng: jax.Array, data: jax.Array, hyperplane_components: int) -> Self:
+    @partial(jax.jit, static_argnames=("cls", "hyperplane_components"))
+    def fit(cls, rng: jax.Array, data: jax.Array, hyperplane_components: int):
         points, features = data.shape
         max_depth = np.ceil(np.log2(points)).astype(np.int8)
         nodes = 2 ** (max_depth + 1) - 1
@@ -97,4 +93,5 @@ class IsolationTree(NamedTuple):
             reached = reached.at[2 * layer_slice + 2, :].set(
                 reached[layer_slice] & (distances[layer_slice] <= intercepts[layer_slice, None])
             )
-        return cls(reached.sum(axis=1), normals, intercepts)
+        node_sizes = reached.sum(axis=1)
+        return cls(normals, intercepts, node_sizes)

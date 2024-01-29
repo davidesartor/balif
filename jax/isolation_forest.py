@@ -1,4 +1,5 @@
 from functools import partial
+from typing import Optional
 import jax
 import jax.numpy as jnp
 from flax import struct
@@ -17,41 +18,60 @@ def expected_depth(sizes: int | jax.Array) -> jax.Array:
     return jnp.where(sizes <= 1, 0.0, correction(sizes))
 
 
-ForestState = IsolationTree  # isolation tree where fields have a batch dimension
-
-
 class ExtendedIsolationForest(struct.PyTreeNode):
-    n_estimators: int
-    max_samples: int
-    hyperplane_components: int | None = None
-    bootstrap: bool = True
-
-    @partial(jax.jit, static_argnames=("self",))
-    def fit(self, rng: jax.Array, data: jax.Array) -> ForestState:
-        rng_subsample, rng_forest = jax.random.split(rng)
-
-        subsamples = jax.vmap(
-            partial(jax.random.choice, a=data, shape=(self.max_samples,), replace=self.bootstrap)
-        )(jax.random.split(rng_subsample, self.n_estimators))
-
-        return jax.vmap(IsolationTree.fit, in_axes=(0, 0, None))(
-            jax.random.split(rng_forest, self.n_estimators),
-            subsamples,
-            self.hyperplane_components or data.shape[-1],
-        )
+    normals: jax.Array
+    intercepts: jax.Array
+    node_sizes: jax.Array
+    expected_subtree_depth: jax.Array
 
     @jax.jit
-    def score_samples(self, trees: ForestState, data: jax.Array) -> jax.Array:
-        get_paths_size = jax.vmap(IsolationTree.path_sizes, in_axes=(None, 0))
-        get_forest_paths_size = jax.vmap(get_paths_size, in_axes=(0, None))
+    def paths(self, point: jax.Array) -> jax.Array:
+        paths = jax.vmap(IsolationTree.path, in_axes=(0, None))(self, point)
+        return paths
 
-        path_sizes = get_forest_paths_size(trees, data)
-        isolation_depths = path_sizes.argmin(axis=-1) + expected_depth(path_sizes.min(axis=-1))
-        score = jnp.power(2, -isolation_depths.mean(axis=0) / expected_depth(self.max_samples))
+    @jax.jit
+    def score(self, point: jax.Array) -> jax.Array:
+        paths = self.paths(point)
+        sizes = jax.vmap(jnp.take)(self.node_sizes, paths)
+        corrections = jax.vmap(jnp.take)(self.expected_subtree_depth, paths)
+
+        isolation_depths = sizes.argmin(axis=-1) + corrections.min(axis=-1)
+        score = 2 ** -(isolation_depths / corrections.max(axis=-1)).mean()
         return score
+
+    @jax.jit
+    def score_samples(self, data: jax.Array) -> jax.Array:
+        return jax.vmap(self.score)(data)
 
     def decision_function(self, data: jax.Array) -> jax.Array:
         ...
 
     def predict(self, data: jax.Array) -> jax.Array:
         ...
+
+    @classmethod
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))
+    def fit(
+        cls,
+        rng: jax.Array,
+        data: jax.Array,
+        n_estimators: int,
+        max_samples: Optional[int] = None,
+        hyperplane_components: Optional[int] = None,
+        bootstrap: bool = True,
+    ):
+        rng_subsample, rng_forest = jax.random.split(rng)
+        max_samples = max_samples or min((256, data.shape[0]))
+
+        subsamples = jax.vmap(
+            partial(jax.random.choice, a=data, shape=(max_samples,), replace=bootstrap)
+        )(jax.random.split(rng_subsample, n_estimators))
+
+        trees = jax.vmap(IsolationTree.fit, in_axes=(0, 0, None))(
+            jax.random.split(rng_forest, n_estimators),
+            subsamples,
+            hyperplane_components or data.shape[-1],
+        )
+        return cls(
+            trees.normals, trees.intercepts, trees.node_sizes, expected_depth(trees.node_sizes)
+        )
