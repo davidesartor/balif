@@ -3,53 +3,46 @@ from typing import Literal, Optional, overload
 import jax
 import jax.numpy as jnp
 from flax import struct
-from isolation_tree import IsolationTree
-from isolation_forest import ExtendedIsolationForest
+from isolation_forest import IsolationTree, ExtendedIsolationForest
 
 
-class Balif(ExtendedIsolationForest):
-    alphas: jax.Array
-    betas: jax.Array
-
-    @jax.jit
-    def score(self, point: jax.Array):
-        alpha, beta = self.get_distr_params(point)
-        score = alpha / (alpha + beta)
-        score = jnp.exp(jnp.mean(jnp.log(score)))  # geometric mean
-        return score
+class BalifTree(IsolationTree):
+    alphas: jax.Array  # shape (nodes,)
+    betas: jax.Array  # shape (nodes,)
 
     @jax.jit
-    def get_distr_params(self, point: jax.Array) -> tuple[jax.Array, jax.Array]:
-        paths = self.paths(point)
-        isolation_depths = jax.vmap(jnp.take)(self.node_sizes, paths).argmin(axis=-1)
-        isolation_nodes = jax.vmap(jnp.take)(paths, isolation_depths)
-        alpha = jax.vmap(jnp.take)(self.alphas, isolation_nodes)
-        beta = jax.vmap(jnp.take)(self.betas, isolation_nodes)
-        return alpha, beta
-
-    @partial(jax.jit, static_argnums=(-1,))
-    def interest_for(self, point: jax.Array, strat="margin") -> jax.Array:
-        if strat == "anom":
-            return self.score(point)
-        elif strat == "margin":
-            alpha, beta = self.get_distr_params(point)
-            # alpha beta sono le distr di ogni nodo, il margine è globale
-            # da sistemare una volta decisa la regola di riduzione
-            r = 0.5
-            margin = jax.scipy.stats.beta.pdf(r, alpha, beta)
-            return margin
-        else:
-            raise ValueError(f"Unknown interest strategy {strat}")
+    def score(self, point: jax.Array, use_full_path=True) -> jax.Array:
+        path = self.path(point)
+        if not use_full_path:
+            path = path[self.node_sizes[path].argmin()][None]
+        alpha = jnp.mean(self.alphas[path] * 2 ** jnp.arange(path.size))
+        beta = jnp.mean(self.betas[path] * 2 ** jnp.arange(path.size))
+        return alpha / (alpha + beta)
 
     @jax.jit
-    def update(self, point: jax.Array, is_anomaly=True):
-        def tree_update(alphas, betas, path):
-            new_alphas = jax.lax.select(is_anomaly, alphas.at[path].add(1), alphas)
-            new_betas = jax.lax.select(is_anomaly, betas, betas.at[path].add(1))
-            return new_alphas, new_betas
-
-        new_alphas, new_betas = jax.vmap(tree_update)(self.alphas, self.betas, self.paths(point))
+    def register(self, point: jax.Array, is_anomaly: bool):
+        path = self.path(point)
+        new_alphas = jax.lax.select(is_anomaly, self.alphas.at[path].add(1), self.alphas)
+        new_betas = jax.lax.select(is_anomaly, self.betas, self.betas.at[path].add(1))
         return self.replace(alphas=new_alphas, betas=new_betas)
+
+
+class Balif(struct.PyTreeNode):
+    trees: BalifTree
+
+    @jax.jit
+    def score(self, point: jax.Array) -> jax.Array:
+        tree_scores = jax.vmap(BalifTree.score, in_axes=(0, None))(self.trees, point)
+        return jnp.exp(jnp.log(tree_scores).mean())
+
+    @jax.jit
+    def score_samples(self, data: jax.Array) -> jax.Array:
+        return jax.vmap(self.score)(data)
+
+    @jax.jit
+    def register(self, point: jax.Array, is_anomaly: bool):
+        vmap_register = jax.vmap(BalifTree.register, in_axes=(0, None, None))
+        return self.replace(trees=vmap_register(self.trees, point, is_anomaly))
 
     @classmethod
     @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))
@@ -63,27 +56,40 @@ class Balif(ExtendedIsolationForest):
         bootstrap: bool = True,
         prior_sample_size=1.0,
     ):
-        forest = ExtendedIsolationForest.fit(
+        forest: ExtendedIsolationForest = ExtendedIsolationForest.fit(
             rng, data, n_estimators, max_samples, hyperplane_components, bootstrap
         )
+
         # single tree IF score. Note that this is not a good way to set the prior
         # the root has score of 0.5 -> contamination = 0.5
         # a node separated at first step has score of 2**(1/(2log(psi)-1)) ~= 0.95
         # a node at maxdepth with all points has score of 2**-1 -log2(psi)/(2log(psi)-1) ~= 0.3
-        node_depth = jnp.log2(1 + jnp.indices(forest.node_sizes.shape)[1]).astype(int)
-        expected_from_root = forest.expected_subtree_depth.max(axis=-1, keepdims=True)
-        scores = 2 ** -((node_depth + forest.expected_subtree_depth) / expected_from_root)
+        corrected_depth = forest.trees.depths + forest.trees.expected_subtree_depth
+        expected_from_root = forest.trees.expected_subtree_depth[:, 0]
+        base_scores = 2 ** -(corrected_depth / expected_from_root[:, None])
 
-        # naive correction
-        scores = (scores - scores.min()) / (scores.max() - scores.min())
-        alphas = prior_sample_size * scores
-        betas = prior_sample_size - alphas
+        # naive range correction
+        base_scores = (4 / 3) * (base_scores - 0.25)
+
+        # clips prediction for "phantom" nodes after isolation
+        # this is just an approximation, and sets it to the most extreme value in the tree
+        isolation_scores = jnp.max(base_scores, axis=-1, keepdims=True)
+        base_scores = jnp.where(forest.trees.node_sizes > 1, base_scores, isolation_scores)
+
+        # match the predition adding strictly positive virtual samples
+        prior_sample_size = 0.01
+        sample_size_after_IF = prior_sample_size / jnp.minimum(base_scores, 1 - base_scores)
+        alphas = sample_size_after_IF * base_scores
+        betas = sample_size_after_IF * (1 - base_scores)
 
         return cls(
-            forest.normals,
-            forest.intercepts,
-            forest.node_sizes,
-            forest.expected_subtree_depth,
-            alphas,
-            betas,
+            BalifTree(
+                forest.trees.normals,
+                forest.trees.intercepts,
+                forest.trees.depths,
+                forest.trees.node_sizes,
+                forest.trees.expected_subtree_depth,
+                alphas,
+                betas,
+            )
         )
