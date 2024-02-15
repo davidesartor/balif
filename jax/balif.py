@@ -11,10 +11,16 @@ class BalifTree(IsolationTree):
     betas: jax.Array  # shape (nodes,)
 
     @jax.jit
-    def score(self, point: jax.Array, use_full_path=True) -> jax.Array:
+    def score(self, point: jax.Array) -> jax.Array:
         path = self.path(point)
-        if not use_full_path:
-            path = path[self.node_sizes[path].argmin()][None]
+        isolation_node = path[self.node_sizes[path].argmin()]
+        alpha = self.alphas[isolation_node]
+        beta = self.betas[isolation_node]
+        return alpha / (alpha + beta)
+
+    @jax.jit
+    def score_full_path(self, point: jax.Array) -> jax.Array:
+        path = self.path(point)
         alpha = jnp.mean(self.alphas[path] * 2 ** jnp.arange(path.size))
         beta = jnp.mean(self.betas[path] * 2 ** jnp.arange(path.size))
         return alpha / (alpha + beta)
@@ -31,13 +37,15 @@ class Balif(struct.PyTreeNode):
     trees: BalifTree
 
     @jax.jit
-    def score(self, point: jax.Array) -> jax.Array:
-        tree_scores = jax.vmap(BalifTree.score, in_axes=(0, None))(self.trees, point)
+    def score(self, point: jax.Array, use_full_path=True) -> jax.Array:
+        tree_scores = jax.vmap(BalifTree.score, in_axes=(0, None, None))(
+            self.trees, point, use_full_path
+        )
         return jnp.exp(jnp.log(tree_scores).mean())
 
     @jax.jit
-    def score_samples(self, data: jax.Array) -> jax.Array:
-        return jax.vmap(self.score)(data)
+    def score_samples(self, data: jax.Array, use_full_path=True) -> jax.Array:
+        return jax.vmap(self.score, in_axes=(0, None))(data, use_full_path)
 
     @jax.jit
     def register(self, point: jax.Array, is_anomaly: bool):
@@ -77,7 +85,7 @@ class Balif(struct.PyTreeNode):
         base_scores = jnp.where(forest.trees.node_sizes > 1, base_scores, isolation_scores)
 
         # match the predition adding strictly positive virtual samples
-        prior_sample_size = 0.01
+        prior_sample_size = 0.1
         sample_size_after_IF = prior_sample_size / jnp.minimum(base_scores, 1 - base_scores)
         alphas = sample_size_after_IF * base_scores
         betas = sample_size_after_IF * (1 - base_scores)
