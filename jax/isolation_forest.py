@@ -10,7 +10,6 @@ class IsolationTree(struct.PyTreeNode):
     normals: jax.Array  # shape (nodes, features)
     intercepts: jax.Array  # shape (nodes,)
     node_sizes: jax.Array  # shape (nodes,)
-    # expected_subtree_depth: jax.Array  # shape (nodes,)
 
     @staticmethod
     def depth(node_id: jnp.int_) -> jnp.int_:
