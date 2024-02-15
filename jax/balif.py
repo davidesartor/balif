@@ -119,7 +119,7 @@ class Balif(struct.PyTreeNode):
     @partial(
         jax.jit, static_argnames=("cls", "n_estimators", "max_samples", "hyperplane_components")
     )
-    def fit(cls, rng: jax.Array, data: jax.Array, *, prior_sample_size=0.01, **kwargs):
+    def fit(cls, rng: jax.Array, data: jax.Array, *, prior_sample_size=0.1, **kwargs):
         batch_fit_from_itree = jax.vmap(BalifTree.from_isolation_tree, in_axes=(0, None))
         itrees = ExtendedIsolationForest.fit(rng, data, **kwargs).trees
         return cls(trees=batch_fit_from_itree(itrees, prior_sample_size))
