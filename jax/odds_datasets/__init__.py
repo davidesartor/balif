@@ -24,7 +24,7 @@ large_datasets_names = [
     "annthyroid",
     "mnist",
     "mammography",
-    "cover",
+    # "cover",
 ]
 
 datasets_names = small_datasets_names + medium_datasets_names + large_datasets_names
