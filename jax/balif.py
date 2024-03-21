@@ -82,9 +82,8 @@ class Balif(struct.PyTreeNode):
             return BetaDistribution(alpha, beta)
 
         alphas, betas = jax.vmap(tree_prediction_as_distr)(self.trees)
-        # combined_mean = jnp.exp(jnp.mean(jnp.log(alphas / (alphas + betas))))
-        combined_mean = jnp.mean(alphas / (alphas + betas))  # arithmetic better geometric
-        combined_sample_size = alphas.sum() + betas.sum()
+        combined_mean = jnp.mean(alphas / (alphas + betas), axis=0)
+        combined_sample_size = alphas.sum(axis=0) + betas.sum(axis=0)
         return BetaDistribution.from_mean_and_sample_size(combined_mean, combined_sample_size)
 
     @jax.jit
@@ -106,6 +105,10 @@ class Balif(struct.PyTreeNode):
         return self.replace(trees=jax.vmap(update_tree)(self.trees))
 
     @jax.jit
+    def register_samples(self, data: jax.Array, are_anomaly: jax.Array):
+        return jax.vmap(self.register)(data, are_anomaly)
+
+    @jax.jit
     def interest_for(self, data: jax.Array) -> jax.Array:
         def interest_for_point(point: jax.Array) -> jax.Array:
             distr = self.prediction_as_distr(point)
@@ -113,6 +116,35 @@ class Balif(struct.PyTreeNode):
             return jnp.exp(-logmargin)
 
         return jax.vmap(interest_for_point)(data)
+
+    def get_batch_queries(self, data: jax.Array, k: int = 1):
+        def merge_superpositions(model_superpos1, model_superpos2):
+            alphas1, betas1 = model_superpos1.trees.alphas, model_superpos1.trees.betas
+            alphas2, betas2 = model_superpos2.trees.alphas, model_superpos2.trees.betas
+            trees = model_superpos1.trees.replace(
+                alphas=jnp.concatenate([alphas1, alphas2], axis=-1),
+                betas=jnp.concatenate([betas1, betas2], axis=-1),
+            )
+            return model_superpos1.replace(trees=trees)
+
+        queries_idx = []
+        model_superpos = self.replace(
+            trees=self.trees.replace(
+                alphas=self.trees.alphas[..., jnp.newaxis],
+                betas=self.trees.betas[..., jnp.newaxis],
+            )
+        )
+
+        for _ in range(k):
+            interests_worst_case = model_superpos.interest_for(data).min(axis=-1)
+            query_idx = interests_worst_case.argmax()
+            queries_idx.append(query_idx)
+
+            model_superpos = merge_superpositions(
+                model_superpos.register(data[query_idx], is_anomaly=True),
+                model_superpos.register(data[query_idx], is_anomaly=False),
+            )
+        return jnp.array(queries_idx)
 
     @classmethod
     @partial(
