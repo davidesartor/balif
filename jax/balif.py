@@ -106,7 +106,12 @@ class Balif(struct.PyTreeNode):
 
     @jax.jit
     def register_samples(self, data: jax.Array, are_anomaly: jax.Array):
-        return jax.vmap(self.register)(data, are_anomaly)
+        def update(model, query):
+            point, is_anomaly = query
+            return model.register(point, is_anomaly), None
+
+        updated_model, _ = jax.lax.scan(update, self, (data, are_anomaly))
+        return updated_model
 
     @jax.jit
     def interest_for(self, data: jax.Array) -> jax.Array:
@@ -117,6 +122,7 @@ class Balif(struct.PyTreeNode):
 
         return jax.vmap(interest_for_point)(data)
 
+    @partial(jax.jit, static_argnames=("k",))
     def get_batch_queries(self, data: jax.Array, k: int = 1):
         def merge_superpositions(model_superpos1, model_superpos2):
             alphas1, betas1 = model_superpos1.trees.alphas, model_superpos1.trees.betas
