@@ -33,7 +33,7 @@ class IsolationTree(struct.PyTreeNode):
             child = jax.lax.select(distance >= 0, 2 * node_id + 1, 2 * node_id + 2)
             return child, node_id
 
-        max_depth = int(np.log2(n_nodes + 1)) - 1
+        max_depth = int(np.log2(n_nodes + 1))
         _, path = jax.lax.scan(scan_body, 0, None, length=max_depth)
         return path
 
@@ -43,7 +43,7 @@ class IsolationTree(struct.PyTreeNode):
         n_nodes, n_features = self.normals.shape
 
         def while_cond(node_id):
-            return (node_id < n_nodes) & (self.node_sizes[node_id] > 1)
+            return (2 * node_id + 2 < n_nodes) & (self.node_sizes[node_id] > 1)
 
         def while_body(node_id: jnp.int_) -> jnp.int_:
             distance = jnp.dot(self.normals[node_id], point) - self.intercepts[node_id]

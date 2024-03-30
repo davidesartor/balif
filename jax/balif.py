@@ -3,6 +3,7 @@ from typing import NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 from flax import struct
+import numpy as np
 from isolation_forest import IsolationTree, ExtendedIsolationForest
 
 
@@ -30,38 +31,54 @@ class BetaDistribution(NamedTuple):
         return jax.scipy.stats.beta.logpdf(x, self.alpha, self.beta)
 
 
+def get_score_matrix(max_depth, max_samples):
+    # start with a prob vector with all mass in the last element (max node size)
+    p = jnp.zeros(max_samples).at[-1].set(1)
+
+    # get the transition matrix for the Markov chain of splitting sizes
+    M = jnp.triu(jnp.ones((max_samples, max_samples)), k=1).at[0, 0].set(1)
+    M = M / M.sum(axis=0, keepdims=True)
+
+    # compute the k-step transition matrix for k = 0, ..., hmax
+    Mk = jax.lax.associative_scan(jnp.matmul, jnp.stack([M] * max_depth))
+    Mk = jnp.concatenate([jnp.eye(max_samples)[jnp.newaxis], Mk], axis=0)
+
+    # compute p after i steps for i = 0, ..., hmax
+    # add zero so indexing is correct
+    p = jax.vmap(jnp.matmul, in_axes=(0, None))(Mk, p)
+    p = jnp.concatenate([jnp.zeros((max_depth + 1, 1)), p], axis=1)
+
+    # compute the cumulative distribution function
+    pc = p.cumsum(axis=1)
+    pc = (pc.at[:, 1:].add(pc[:, :-1])) / 2  # assume points are "middle of the pack"
+    pc = jnp.clip(pc, 0.01, 0.99).at[:, 0].set(0)  # fix floating point errors
+    return pc
+
+
 class BalifTree(IsolationTree):
     alphas: jax.Array  # shape (nodes,)
     betas: jax.Array  # shape (nodes,)
 
     @classmethod
-    @partial(jax.jit, static_argnames=("cls",))
-    def from_isolation_tree(cls, itree: IsolationTree, prior_sample_size: jnp.float_):
+    @partial(jax.jit, static_argnames=("cls"))
+    def from_isolation_tree(
+        cls, itree: IsolationTree, score_matrix: jax.Array, prior_sample_size: jnp.float_
+    ):
         def base_scores(itree: IsolationTree) -> jax.Array:
-            """Compute the IF score for each node in the tree"""
-            n_nodes, n_features = itree.normals.shape
+            def scan_score(_, idx):
+                return _, score_matrix[idx[0], idx[1]]
 
-            # single tree IF score. Note that this is not a good way to set the prior
-            # the root has score of 0.5 -> contamination = 0.5
-            # a node separated at first step has score of 2**(1/(2log(psi)-1)) ~= 0.95
-            # a node at maxdepth with all points has score of 2**-1 -log2(psi)/(2log(psi)-1) ~= 0.3
+            n_nodes, n_features = itree.normals.shape
             node_depths = jax.vmap(itree.depth)(jnp.arange(n_nodes))
-            depth_corrections = jax.vmap(itree.expected_depth)(itree.node_sizes)
-            expected_from_root = itree.expected_depth(itree.node_sizes[0])
-            normalized_depths = (node_depths + depth_corrections) / expected_from_root
-            base_scores = 2**-normalized_depths
-            return base_scores
+            _, scores = jax.lax.scan(scan_score, None, (node_depths, itree.node_sizes))
+            return 1 - scores
 
         def get_priors(itree: IsolationTree):
             """Compute the prior for each node in the tree"""
-            # rescale the scores to be in the range [0, 1]
-            scores = (4 / 3) * (base_scores(itree) - 0.25)
-
-            # clips prediction for "phantom" nodes after isolation (sets it to the most extreme value in the tree)
-            # scores = jnp.where(itree.node_sizes > 1, scores, jnp.max(scores))
+            scores = base_scores(itree)
 
             # match the predition adding strictly positive virtual samples
-            sample_size_after_IF = prior_sample_size / jnp.minimum(scores, 1 - scores)
+            sample_size_after_IF = prior_sample_size / (jnp.minimum(scores, 1 - scores))
             alphas = sample_size_after_IF * scores
             betas = sample_size_after_IF * (1 - scores)
             return alphas, betas
@@ -77,12 +94,15 @@ class Balif(struct.PyTreeNode):
     def prediction_as_distr(self, point: jax.Array) -> BetaDistribution:
         def tree_prediction_as_distr(tree) -> BetaDistribution:
             isolation_node = tree.isolation_node(point)
-            alpha = tree.alphas[isolation_node]
-            beta = tree.betas[isolation_node]
+            path = tree.path(point)
+            # weights = jnp.where(path <= isolation_node, 2 ** jnp.arange(len(path)), 0)
+            weights = 2 ** jnp.arange(len(path))
+            alpha = jnp.mean(tree.alphas[path] * weights / weights.sum())
+            beta = jnp.mean(tree.betas[path] * weights / weights.sum())
             return BetaDistribution(alpha, beta)
 
         alphas, betas = jax.vmap(tree_prediction_as_distr)(self.trees)
-        combined_mean = jnp.mean(alphas / (alphas + betas), axis=0)
+        combined_mean = jnp.exp(jnp.log(alphas / (alphas + betas)).mean(axis=0))
         combined_sample_size = alphas.sum(axis=0) + betas.sum(axis=0)
         return BetaDistribution.from_mean_and_sample_size(combined_mean, combined_sample_size)
 
@@ -156,7 +176,19 @@ class Balif(struct.PyTreeNode):
     @partial(
         jax.jit, static_argnames=("cls", "n_estimators", "max_samples", "hyperplane_components")
     )
-    def fit(cls, rng: jax.Array, data: jax.Array, *, prior_sample_size=0.1, **kwargs):
-        batch_fit_from_itree = jax.vmap(BalifTree.from_isolation_tree, in_axes=(0, None))
-        itrees = ExtendedIsolationForest.fit(rng, data, **kwargs).trees
-        return cls(trees=batch_fit_from_itree(itrees, prior_sample_size))
+    def fit(
+        cls,
+        rng: jax.Array,
+        data: jax.Array,
+        *,
+        max_samples: Optional[int] = None,
+        prior_sample_size=0.01,
+        **kwargs,
+    ):
+        max_samples = max_samples or min((256, data.shape[0]))
+        batch_fit_from_itree = jax.vmap(BalifTree.from_isolation_tree, in_axes=(0, None, None))
+        itrees = ExtendedIsolationForest.fit(rng, data, max_samples=max_samples, **kwargs).trees
+
+        max_depth = np.log2(max_samples).astype(int)
+        score_matrix = get_score_matrix(max_depth, max_samples)
+        return cls(trees=batch_fit_from_itree(itrees, score_matrix, prior_sample_size))
