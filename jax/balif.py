@@ -89,19 +89,27 @@ class BalifTree(IsolationTree):
 
 class Balif(struct.PyTreeNode):
     trees: BalifTree
+    path_score: bool
 
     @jax.jit
     def prediction_as_distr(self, point: jax.Array) -> BetaDistribution:
-        def tree_prediction_as_distr(tree) -> BetaDistribution:
-            isolation_node = tree.isolation_node(point)
+        def path_score(tree):
             path = tree.path(point)
-            # weights = jnp.where(path <= isolation_node, 2 ** jnp.arange(len(path)), 0)
-            weights = 2 ** jnp.arange(len(path))
+            isolation_node = path[tree.node_sizes[path].argmin()]
+            weights = jnp.where(path <= isolation_node, 2 ** jnp.arange(len(path)), 0)
+            # weights = 2 ** jnp.arange(len(path))
             alpha = jnp.mean(tree.alphas[path] * weights / weights.sum())
             beta = jnp.mean(tree.betas[path] * weights / weights.sum())
             return BetaDistribution(alpha, beta)
 
-        alphas, betas = jax.vmap(tree_prediction_as_distr)(self.trees)
+        def isolation_score(tree) -> BetaDistribution:
+            isolation_node = tree.isolation_node(point)
+            alpha, beta = tree.alphas[isolation_node], tree.betas[isolation_node]
+            return BetaDistribution(alpha, beta)
+
+        alphas, betas = jax.lax.cond(
+            self.path_score, jax.vmap(path_score), jax.vmap(isolation_score), operand=self.trees
+        )
         combined_mean = jnp.exp(jnp.log(alphas / (alphas + betas)).mean(axis=0))
         combined_sample_size = alphas.sum(axis=0) + betas.sum(axis=0)
         return BetaDistribution.from_mean_and_sample_size(combined_mean, combined_sample_size)
@@ -183,6 +191,7 @@ class Balif(struct.PyTreeNode):
         *,
         max_samples: Optional[int] = None,
         prior_sample_size=0.01,
+        path_score=True,
         **kwargs,
     ):
         max_samples = max_samples or min((256, data.shape[0]))
@@ -191,4 +200,7 @@ class Balif(struct.PyTreeNode):
 
         max_depth = np.log2(max_samples).astype(int)
         score_matrix = get_score_matrix(max_depth, max_samples)
-        return cls(trees=batch_fit_from_itree(itrees, score_matrix, prior_sample_size))
+        return cls(
+            trees=batch_fit_from_itree(itrees, score_matrix, prior_sample_size),
+            path_score=path_score,
+        )
