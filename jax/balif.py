@@ -50,7 +50,7 @@ def get_score_matrix(max_depth, max_samples):
 
     # compute the cumulative distribution function
     pc = p.cumsum(axis=1)
-    pc = (pc.at[:, 1:].add(pc[:, :-1])) / 2  # assume points are "middle of the pack"
+    #pc = (pc.at[:, 1:].add(pc[:, :-1])) / 2  # assume points are "middle of the pack"
     pc = jnp.clip(pc, 0.01, 0.99).at[:, 0].set(0)  # fix floating point errors
     return pc
 
@@ -66,19 +66,19 @@ class BalifTree(IsolationTree):
     ):
         def base_scores(itree: IsolationTree) -> jax.Array:
             def scan_score(_, idx):
-                return _, score_matrix[idx[0], idx[1]]
+                return _, 1-score_matrix[idx[0], idx[1]]
 
             n_nodes, n_features = itree.normals.shape
             node_depths = jax.vmap(itree.depth)(jnp.arange(n_nodes))
             _, scores = jax.lax.scan(scan_score, None, (node_depths, itree.node_sizes))
-            return 1 - scores
+            return scores
 
         def get_priors(itree: IsolationTree):
             """Compute the prior for each node in the tree"""
             scores = base_scores(itree)
 
             # match the predition adding strictly positive virtual samples
-            sample_size_after_IF = prior_sample_size / (jnp.minimum(scores, 1 - scores))
+            sample_size_after_IF = prior_sample_size #/ (jnp.minimum(scores, 1 - scores))
             alphas = sample_size_after_IF * scores
             betas = sample_size_after_IF * (1 - scores)
             return alphas, betas
@@ -90,6 +90,26 @@ class BalifTree(IsolationTree):
 class Balif(struct.PyTreeNode):
     trees: BalifTree
     path_score: bool
+
+    def test(self, point: jax.Array):
+        def path_score(tree):
+            path = tree.path(point)
+            isolation_node = path[tree.node_sizes[path].argmin()]
+            weights = jnp.where(path <= isolation_node, 2 ** jnp.arange(len(path)), 0)
+            # weights = 2 ** jnp.arange(len(path))
+            alpha = jnp.mean(tree.alphas[path] * weights / weights.sum())
+            beta = jnp.mean(tree.betas[path] * weights / weights.sum())
+            return BetaDistribution(alpha, beta)
+
+        def isolation_score(tree) -> BetaDistribution:
+            isolation_node = tree.isolation_node(point)
+            alpha, beta = tree.alphas[isolation_node], tree.betas[isolation_node]
+            return BetaDistribution(alpha, beta)
+
+        alphas, betas = jax.lax.cond(
+            self.path_score, jax.vmap(path_score), jax.vmap(isolation_score), operand=self.trees
+        )
+        return alphas, betas
 
     @jax.jit
     def prediction_as_distr(self, point: jax.Array) -> BetaDistribution:
@@ -110,7 +130,7 @@ class Balif(struct.PyTreeNode):
         alphas, betas = jax.lax.cond(
             self.path_score, jax.vmap(path_score), jax.vmap(isolation_score), operand=self.trees
         )
-        combined_mean = jnp.exp(jnp.log(alphas / (alphas + betas)).mean(axis=0))
+        combined_mean = 1-jnp.exp(jnp.log(betas / (alphas + betas)).mean(axis=0))
         combined_sample_size = alphas.sum(axis=0) + betas.sum(axis=0)
         return BetaDistribution.from_mean_and_sample_size(combined_mean, combined_sample_size)
 
@@ -190,8 +210,8 @@ class Balif(struct.PyTreeNode):
         data: jax.Array,
         *,
         max_samples: Optional[int] = None,
-        prior_sample_size=0.01,
-        path_score=True,
+        prior_sample_size=0.1,
+        path_score=False,
         **kwargs,
     ):
         max_samples = max_samples or min((256, data.shape[0]))
