@@ -50,7 +50,7 @@ def get_score_matrix(max_depth, max_samples):
 
     # compute the cumulative distribution function
     pc = p.cumsum(axis=1)
-    #pc = (pc.at[:, 1:].add(pc[:, :-1])) / 2  # assume points are "middle of the pack"
+    pc = (pc.at[:, 1:].add(pc[:, :-1])) / 2  # assume points are "middle of the pack"
     pc = jnp.clip(pc, 0.01, 0.99).at[:, 0].set(0)  # fix floating point errors
     return pc
 
@@ -162,10 +162,10 @@ class Balif(struct.PyTreeNode):
         return updated_model
 
     @jax.jit
-    def interest_for(self, data: jax.Array) -> jax.Array:
+    def interest_for(self, data: jax.Array, r=0.5) -> jax.Array:
         def interest_for_point(point: jax.Array) -> jax.Array:
             distr = self.prediction_as_distr(point)
-            logmargin = distr.logpdf(distr.mode) - distr.logpdf(x=0.5)
+            logmargin = distr.logpdf(distr.mode) - distr.logpdf(x=r)
             return jnp.exp(-logmargin)
 
         return jax.vmap(interest_for_point)(data)
