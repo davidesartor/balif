@@ -8,24 +8,38 @@ from isolation_forest import IsolationTree, ExtendedIsolationForest
 
 
 class BetaDistribution(NamedTuple):
-    alpha: jnp.float_
-    beta: jnp.float_
+    alpha: jax.Array
+    beta: jax.Array
 
     @classmethod
-    def from_mean_and_sample_size(cls, mean: jnp.float_, sample_size: jnp.float_):
+    def from_mean_and_sample_size(cls, mean: jax.Array, sample_size: jax.Array):
         return cls(mean * sample_size, (1 - mean) * sample_size)
 
-    @property
-    def mean(self) -> jnp.float_:
-        return self.alpha / (self.alpha + self.beta)
+    @classmethod
+    def from_mean_and_variance(cls, mean: jax.Array, variance: jax.Array):
+        alpha = mean * (mean * (1 - mean) / variance - 1)
+        beta = (1 - mean) * (mean * (1 - mean) / variance - 1)
+        return cls(alpha, beta)
 
     @property
-    def mode(self) -> jnp.float_:
+    def samplesize(self) -> jax.Array:
+        return self.alpha + self.beta
+
+    @property
+    def mean(self) -> jax.Array:
+        return self.alpha / self.samplesize
+
+    @property
+    def mode(self) -> jax.Array:
         return jax.lax.select(
             jnp.minimum(self.alpha, self.beta) > 1,
-            (self.alpha - 1) / (self.alpha + self.beta - 2),
-            jax.lax.select(self.alpha > self.beta, 1.0, 0.0),
+            (self.alpha - 1) / (self.samplesize - 2),
+            jax.lax.select((self.alpha > self.beta), 1.0, 0.0),
         )
+
+    @property
+    def variance(self) -> jax.Array:
+        return self.alpha * self.beta / ((self.samplesize + 1) * (self.samplesize) ** 2)
 
     def logpdf(self, x: jnp.float_) -> jnp.float_:
         return jax.scipy.stats.beta.logpdf(x, self.alpha, self.beta)
@@ -62,11 +76,14 @@ class BalifTree(IsolationTree):
     @classmethod
     @partial(jax.jit, static_argnames=("cls"))
     def from_isolation_tree(
-        cls, itree: IsolationTree, score_matrix: jax.Array, prior_sample_size: jnp.float_
+        cls,
+        itree: IsolationTree,
+        score_matrix: jax.Array,
+        prior_sample_size: jnp.float_,
     ):
         def base_scores(itree: IsolationTree) -> jax.Array:
             def scan_score(_, idx):
-                return _, 1-score_matrix[idx[0], idx[1]]
+                return _, 1 - score_matrix[idx[0], idx[1]]
 
             n_nodes, n_features = itree.normals.shape
             node_depths = jax.vmap(itree.depth)(jnp.arange(n_nodes))
@@ -78,7 +95,9 @@ class BalifTree(IsolationTree):
             scores = base_scores(itree)
 
             # match the predition adding strictly positive virtual samples
-            sample_size_after_IF = prior_sample_size #/ (jnp.minimum(scores, 1 - scores))
+            sample_size_after_IF = (
+                prior_sample_size  # / (jnp.minimum(scores, 1 - scores))
+            )
             alphas = sample_size_after_IF * scores
             betas = sample_size_after_IF * (1 - scores)
             return alphas, betas
@@ -107,7 +126,10 @@ class Balif(struct.PyTreeNode):
             return BetaDistribution(alpha, beta)
 
         alphas, betas = jax.lax.cond(
-            self.path_score, jax.vmap(path_score), jax.vmap(isolation_score), operand=self.trees
+            self.path_score,
+            jax.vmap(path_score),
+            jax.vmap(isolation_score),
+            operand=self.trees,
         )
         return alphas, betas
 
@@ -127,12 +149,18 @@ class Balif(struct.PyTreeNode):
             alpha, beta = tree.alphas[isolation_node], tree.betas[isolation_node]
             return BetaDistribution(alpha, beta)
 
-        alphas, betas = jax.lax.cond(
-            self.path_score, jax.vmap(path_score), jax.vmap(isolation_score), operand=self.trees
+        distributions = jax.lax.cond(
+            self.path_score,
+            jax.vmap(path_score),
+            jax.vmap(isolation_score),
+            operand=self.trees,
         )
-        combined_mean = 1-jnp.exp(jnp.log(betas / (alphas + betas)).mean(axis=0))
-        combined_sample_size = alphas.sum(axis=0) + betas.sum(axis=0)
-        return BetaDistribution.from_mean_and_sample_size(combined_mean, combined_sample_size)
+        # combined_mean = 1 - jnp.exp(jnp.log(betas / (alphas + betas)).mean(axis=0))
+
+        return BetaDistribution.from_mean_and_variance(
+            mean=jnp.mean(distributions.mean, axis=-1),
+            variance=jnp.mean(distributions.variance, axis=-1) / len(distributions),
+        )
 
     @jax.jit
     def score(self, point: jax.Array) -> jax.Array:
@@ -198,11 +226,12 @@ class Balif(struct.PyTreeNode):
                 model_superpos.register(data[query_idx], is_anomaly=True),
                 model_superpos.register(data[query_idx], is_anomaly=False),
             )
-        return jnp.array(queries_idx)
+        return jax.Array(queries_idx)
 
     @classmethod
     @partial(
-        jax.jit, static_argnames=("cls", "n_estimators", "max_samples", "hyperplane_components")
+        jax.jit,
+        static_argnames=("cls", "n_estimators", "max_samples", "hyperplane_components"),
     )
     def fit(
         cls,
@@ -215,8 +244,12 @@ class Balif(struct.PyTreeNode):
         **kwargs,
     ):
         max_samples = max_samples or min((256, data.shape[0]))
-        batch_fit_from_itree = jax.vmap(BalifTree.from_isolation_tree, in_axes=(0, None, None))
-        itrees = ExtendedIsolationForest.fit(rng, data, max_samples=max_samples, **kwargs).trees
+        batch_fit_from_itree = jax.vmap(
+            BalifTree.from_isolation_tree, in_axes=(0, None, None)
+        )
+        itrees = ExtendedIsolationForest.fit(
+            rng, data, max_samples=max_samples, **kwargs
+        ).trees
 
         max_depth = np.log2(max_samples).astype(int)
         score_matrix = get_score_matrix(max_depth, max_samples)
