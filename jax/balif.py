@@ -1,7 +1,9 @@
 from functools import partial
 from typing import NamedTuple, Optional
+
 import jax
 import jax.numpy as jnp
+from jax.scipy.special import gammaln
 from flax import struct
 import numpy as np
 from isolation_forest import IsolationTree, ExtendedIsolationForest
@@ -46,12 +48,19 @@ class BetaDistribution(NamedTuple):
 
 
 def get_score_matrix(max_depth, max_samples):
-    # start with a prob vector with all mass in the last element (max node size)
-    p = jnp.zeros(max_samples).at[-1].set(1)
+    def p(start, end):
+        start, end = start - 2, end - 1
+        bin_coef_ln = gammaln(start + 1) - gammaln(end + 1) - gammaln(start - end + 1)
+        return jnp.exp(bin_coef_ln + start * jnp.log(0.5))
 
     # get the transition matrix for the Markov chain of splitting sizes
-    M = jnp.triu(jnp.ones((max_samples, max_samples)), k=1).at[0, 0].set(1)
-    M = M / M.sum(axis=0, keepdims=True)
+    M = jax.vmap(jax.vmap(p, in_axes=(0, None)), in_axes=(None, 0))(
+        jnp.arange(1, max_samples + 1), jnp.arange(1, max_samples + 1)
+    )
+    M = M.at[:, 0].set(0).at[0, 0].set(1)
+
+    # start with a prob vector with all mass in the last element (max node size)
+    p = jnp.zeros(max_samples).at[-1].set(1)
 
     # compute the k-step transition matrix for k = 0, ..., hmax
     Mk = jax.lax.associative_scan(jnp.matmul, jnp.stack([M] * max_depth))
@@ -109,29 +118,6 @@ class BalifTree(IsolationTree):
 class Balif(struct.PyTreeNode):
     trees: BalifTree
     path_score: bool
-
-    def test(self, point: jax.Array):
-        def path_score(tree):
-            path = tree.path(point)
-            isolation_node = path[tree.node_sizes[path].argmin()]
-            weights = jnp.where(path <= isolation_node, 2 ** jnp.arange(len(path)), 0)
-            # weights = 2 ** jnp.arange(len(path))
-            alpha = jnp.mean(tree.alphas[path] * weights / weights.sum())
-            beta = jnp.mean(tree.betas[path] * weights / weights.sum())
-            return BetaDistribution(alpha, beta)
-
-        def isolation_score(tree) -> BetaDistribution:
-            isolation_node = tree.isolation_node(point)
-            alpha, beta = tree.alphas[isolation_node], tree.betas[isolation_node]
-            return BetaDistribution(alpha, beta)
-
-        alphas, betas = jax.lax.cond(
-            self.path_score,
-            jax.vmap(path_score),
-            jax.vmap(isolation_score),
-            operand=self.trees,
-        )
-        return alphas, betas
 
     @jax.jit
     def prediction_as_distr(self, point: jax.Array) -> BetaDistribution:
