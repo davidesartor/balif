@@ -1,245 +1,186 @@
 from functools import partial
-from typing import NamedTuple, Optional
-
+from typing import Literal, NamedTuple, Optional, Self
+from jaxtyping import Array, Float, Bool, Int, PRNGKeyArray
 import jax
 import jax.numpy as jnp
+import jax.random as jr
+import equinox as eqx
 from jax.scipy.special import gammaln
-from flax import struct
 import numpy as np
-from isolation_forest import IsolationTree, ExtendedIsolationForest
+from forests import IsolationTree, IsolationForest
 
 
-class BetaDistribution(NamedTuple):
-    alpha: jax.Array
-    beta: jax.Array
-
-    @classmethod
-    def from_mean_and_sample_size(cls, mean: jax.Array, sample_size: jax.Array):
-        return cls(mean * sample_size, (1 - mean) * sample_size)
-
-    @classmethod
-    def from_mean_and_variance(cls, mean: jax.Array, variance: jax.Array):
-        alpha = mean * (mean * (1 - mean) / variance - 1)
-        beta = (1 - mean) * (mean * (1 - mean) / variance - 1)
-        return cls(alpha, beta)
+class BetaDistribution(eqx.Module):
+    alpha: Float[Array, "..."] = eqx.field(default_factory=lambda: jnp.ones(()))
+    beta: Float[Array, "..."] = eqx.field(default_factory=lambda: jnp.ones(()))
 
     @property
-    def samplesize(self) -> jax.Array:
+    def mean(self) -> Float[Array, "..."]:
+        return self.alpha / (self.alpha + self.beta)
+
+    @property
+    def nu(self) -> Float[Array, "..."]:
         return self.alpha + self.beta
 
     @property
-    def mean(self) -> jax.Array:
-        return self.alpha / self.samplesize
+    def var(self) -> Float[Array, "..."]:
+        return self.alpha * self.beta / ((self.nu + 1) * (self.nu) ** 2)
 
     @property
-    def mode(self) -> jax.Array:
+    def mode(self) -> Float[Array, "..."]:
         return jax.lax.select(
             jnp.minimum(self.alpha, self.beta) > 1,
-            (self.alpha - 1) / (self.samplesize - 2),
+            (self.alpha - 1) / (self.nu - 2),
             jax.lax.select((self.alpha > self.beta), 1.0, 0.0),
         )
 
-    @property
-    def variance(self) -> jax.Array:
-        return self.alpha * self.beta / ((self.samplesize + 1) * (self.samplesize) ** 2)
+    def logpdf(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        logB = gammaln(self.alpha) + gammaln(self.beta) - gammaln(self.nu)
+        log_lk = (self.alpha - 1) * jnp.log(x) + (self.beta - 1) * jnp.log(1 - x)
+        return log_lk - logB
 
-    def logpdf(self, x: jnp.float_) -> jnp.float_:
-        return jax.scipy.stats.beta.logpdf(x, self.alpha, self.beta)
-
-
-def get_score_matrix(max_depth, max_samples):
-    def p(start, end):
-        start, end = start - 2, end - 1
-        bin_coef_ln = gammaln(start + 1) - gammaln(end + 1) - gammaln(start - end + 1)
-        return jnp.exp(bin_coef_ln + start * jnp.log(0.5))
-
-    # get the transition matrix for the Markov chain of splitting sizes
-    M = jax.vmap(jax.vmap(p, in_axes=(0, None)), in_axes=(None, 0))(
-        jnp.arange(1, max_samples + 1), jnp.arange(1, max_samples + 1)
-    )
-    M = M.at[:, 0].set(0).at[0, 0].set(1)
-
-    # start with a prob vector with all mass in the last element (max node size)
-    p = jnp.zeros(max_samples).at[-1].set(1)
-
-    # compute the k-step transition matrix for k = 0, ..., hmax
-    Mk = jax.lax.associative_scan(jnp.matmul, jnp.stack([M] * max_depth))
-    Mk = jnp.concatenate([jnp.eye(max_samples)[jnp.newaxis], Mk], axis=0)
-
-    # compute p after i steps for i = 0, ..., hmax
-    # add zero so indexing is correct
-    p = jax.vmap(jnp.matmul, in_axes=(0, None))(Mk, p)
-    p = jnp.concatenate([jnp.zeros((max_depth + 1, 1)), p], axis=1)
-
-    # compute the cumulative distribution function
-    pc = p.cumsum(axis=1)
-    pc = (pc.at[:, 1:].add(pc[:, :-1])) / 2  # assume points are "middle of the pack"
-    pc = jnp.clip(pc, 0.01, 0.99).at[:, 0].set(0)  # fix floating point errors
-    return pc
-
-
-class BalifTree(IsolationTree):
-    alphas: jax.Array  # shape (nodes,)
-    betas: jax.Array  # shape (nodes,)
+    def pdf(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        return jnp.exp(self.logpdf(x))
 
     @classmethod
-    @partial(jax.jit, static_argnames=("cls"))
-    def from_isolation_tree(
-        cls,
-        itree: IsolationTree,
-        score_matrix: jax.Array,
-        prior_sample_size: jnp.float_,
+    def from_mean_and_nu(cls, mean: Float[Array, "..."], nu: Float[Array, "..."]):
+        return cls(mean * nu, (1 - mean) * nu)
+
+    @classmethod
+    def from_mean_and_var(cls, mean: Float[Array, "..."], var: Float[Array, "..."]):
+        alpha = mean * (mean * (1 - mean) / var - 1)
+        beta = (1 - mean) * (mean * (1 - mean) / var - 1)
+        return cls(alpha, beta)
+
+
+class Balif(IsolationForest):
+    prior_sample_size: Literal["haldane", "jeffreys", "bayes"] | float = 0.1
+    score_reduction: Literal["mean", "mode"] = "mean"
+    query_strategy: Literal["random", "anomalous", "margin"] = "random"
+
+    beliefs: BetaDistribution = eqx.field(init=False, default_factory=BetaDistribution)
+
+    @eqx.filter_jit
+    def fit(self, data: Float[Array, "samples dim"], *, key: PRNGKeyArray) -> Self:
+        key_fit, key_prior = jr.split(key)
+        forest = super().fit(data, key=key_fit)
+
+        def scaled_if_score(tree, node):
+            correction = tree.expected_depth(tree.reached[node])
+            normalization = tree.expected_depth(tree.reached[0])
+            score = 2 ** (-(tree.depth(node) + correction) / normalization)
+            max_depth = 1 + jnp.log2(tree.reached.shape[-1] + 1)
+            min_score = 2 ** (-1 - max_depth / normalization)
+            max_score = 2 ** (-1 / normalization)
+            return jnp.clip((score - min_score) / (max_score - min_score), 0.001, 0.999)
+
+        def fit_priors(tree):
+            nodes = jnp.arange(tree.reached.shape[-1])
+            scores = jax.vmap(scaled_if_score, in_axes=(None, 0))(tree, nodes)
+            if self.prior_sample_size == "haldane":
+                sample_size = 1e-8
+            elif self.prior_sample_size == "jeffreys":
+                sample_size = 0.5
+            elif self.prior_sample_size == "bayes":
+                sample_size = 1.0
+            elif not isinstance(self.prior_sample_size, float):
+                raise ValueError(f"Unknown prior sample size: {self.prior_sample_size}")
+            else:
+                sample_size = self.prior_sample_size
+            sample_size = sample_size / jnp.minimum(scores, 1 - scores)
+            return BetaDistribution.from_mean_and_nu(mean=scores, nu=sample_size)
+
+        beliefs = jax.vmap(fit_priors)(forest.trees)
+        return eqx.tree_at(
+            lambda x: (x.trees, x.beliefs), self, (forest.trees, beliefs)
+        )
+
+    @eqx.filter_jit
+    def score_as_distribution(
+        self, data: Float[Array, "*batch dim"], *, key: PRNGKeyArray
     ):
-        def base_scores(itree: IsolationTree) -> jax.Array:
-            def scan_score(_, idx):
-                return _, 1 - score_matrix[idx[0], idx[1]]
+        def get_belief(tree, treebeliefs, point, key) -> BetaDistribution:
+            terminal, _ = tree.path(point, key=key)
+            belief = jax.tree.map(lambda x: x[terminal], treebeliefs)
+            return belief
 
-            n_nodes, n_features = itree.normals.shape
-            node_depths = jax.vmap(itree.depth)(jnp.arange(n_nodes))
-            _, scores = jax.lax.scan(scan_score, None, (node_depths, itree.node_sizes))
-            return scores
-
-        def get_priors(itree: IsolationTree):
-            """Compute the prior for each node in the tree"""
-            scores = base_scores(itree)
-
-            # match the predition adding strictly positive virtual samples
-            sample_size_after_IF = (
-                prior_sample_size  # / (jnp.minimum(scores, 1 - scores))
+        def combined_beliefs(point):
+            keys = jr.split(key, self.n_estimators)
+            beliefs = jax.vmap(get_belief, in_axes=(0, 0, None, 0))(
+                self.trees, self.beliefs, point, keys
             )
-            alphas = sample_size_after_IF * scores
-            betas = sample_size_after_IF * (1 - scores)
-            return alphas, betas
+            return BetaDistribution.from_mean_and_var(
+                mean=beliefs.mean.mean(),
+                var=beliefs.var.mean() / self.n_estimators,
+            )
 
-        alphas, betas = get_priors(itree)
-        return cls(itree.normals, itree.intercepts, itree.node_sizes, alphas, betas)
+        *batch, dim = data.shape
+        for _ in batch:
+            combined_beliefs = jax.vmap(combined_beliefs)
+        return combined_beliefs(data)
 
+    @eqx.filter_jit
+    def score(self, data: Float[Array, "*batch dim"], *, key: PRNGKeyArray):
+        belief = self.score_as_distribution(data, key=key)
+        if self.score_reduction == "mean":
+            return belief.mean
+        elif self.score_reduction == "mode":
+            return belief.mode
+        else:
+            raise ValueError(f"Unknown score reduction method: {self.score_reduction}")
 
-class Balif(struct.PyTreeNode):
-    trees: BalifTree
-    path_score: bool
+    @eqx.filter_jit
+    def register(
+        self,
+        data: Float[Array, "*batch dim"],
+        *,
+        key: PRNGKeyArray,
+        is_anomaly: Bool[Array, "*batch"],
+    ) -> Self:
+        def update_tree(tree, treebeliefs, point, is_anom, key):
+            terminal, path = tree.path(point, key=key)
+            new_beliefs = jax.tree.map(
+                lambda b, obs: b.at[terminal].add(obs),
+                treebeliefs,
+                BetaDistribution(is_anom, 1 - is_anom),
+            )
+            return new_beliefs
 
-    @jax.jit
-    def prediction_as_distr(self, point: jax.Array) -> BetaDistribution:
-        def path_score(tree):
-            path = tree.path(point)
-            isolation_node = path[tree.node_sizes[path].argmin()]
-            weights = jnp.where(path <= isolation_node, 2 ** jnp.arange(len(path)), 0)
-            # weights = 2 ** jnp.arange(len(path))
-            alpha = jnp.mean(tree.alphas[path] * weights / weights.sum())
-            beta = jnp.mean(tree.betas[path] * weights / weights.sum())
-            return BetaDistribution(alpha, beta)
+        def update_forest(point, is_anom):
+            keys = jr.split(key, self.n_estimators)
+            return jax.vmap(update_tree, in_axes=(0, 0, None, None, 0))(
+                self.trees, self.beliefs, point, is_anom, keys
+            )
 
-        def isolation_score(tree) -> BetaDistribution:
-            isolation_node = tree.isolation_node(point)
-            alpha, beta = tree.alphas[isolation_node], tree.betas[isolation_node]
-            return BetaDistribution(alpha, beta)
+        *batch, dim = data.shape
+        for _ in batch:
+            update_forest = jax.vmap(update_forest)
+        new_beliefs = update_forest(data, is_anomaly)
+        return eqx.tree_at(lambda x: x.beliefs, self, new_beliefs)
 
-        distributions = jax.lax.cond(
-            self.path_score,
-            jax.vmap(path_score),
-            jax.vmap(isolation_score),
-            operand=self.trees,
-        )
-        # combined_mean = 1 - jnp.exp(jnp.log(betas / (alphas + betas)).mean(axis=0))
-
-        return BetaDistribution.from_mean_and_variance(
-            mean=jnp.mean(distributions.mean, axis=-1),
-            variance=jnp.mean(distributions.variance, axis=-1) / len(distributions),
-        )
-
-    @jax.jit
-    def score(self, point: jax.Array) -> jax.Array:
-        return self.prediction_as_distr(point).mean
-
-    @jax.jit
-    def score_samples(self, data: jax.Array) -> jax.Array:
-        return jax.vmap(self.score)(data)
-
-    @jax.jit
-    def register(self, point: jax.Array, is_anomaly: bool):
-        def update_tree(tree):
-            path = tree.path(point)
-            new_alphas = tree.alphas.at[path].add(jax.lax.select(is_anomaly, 1, 0))
-            new_betas = tree.betas.at[path].add(jax.lax.select(is_anomaly, 0, 1))
-            return tree.replace(alphas=new_alphas, betas=new_betas)
-
-        return self.replace(trees=jax.vmap(update_tree)(self.trees))
-
-    @jax.jit
-    def register_samples(self, data: jax.Array, are_anomaly: jax.Array):
-        def update(model, query):
-            point, is_anomaly = query
-            return model.register(point, is_anomaly), None
-
-        updated_model, _ = jax.lax.scan(update, self, (data, are_anomaly))
-        return updated_model
-
-    @jax.jit
-    def interest_for(self, data: jax.Array, r=0.5) -> jax.Array:
-        def interest_for_point(point: jax.Array) -> jax.Array:
-            distr = self.prediction_as_distr(point)
-            logmargin = distr.logpdf(distr.mode) - distr.logpdf(x=r)
+    @eqx.filter_jit
+    def interest(
+        self,
+        data: Float[Array, "*batch dim"],
+        *,
+        key: PRNGKeyArray,
+    ) -> Float[Array, "*batch"]:
+        def margin(point):
+            r = jnp.array(0.5)
+            belief = self.score_as_distribution(point, key=key)
+            logmargin = belief.logpdf(belief.mode) - belief.logpdf(r)
             return jnp.exp(-logmargin)
 
-        return jax.vmap(interest_for_point)(data)
+        if self.query_strategy == "margin":
+            interest_fn = margin
+        elif self.query_strategy == "anomalous":
+            interest_fn = lambda p: self.score(p, key=key)
+        elif self.query_strategy == "random":
+            interest_fn = lambda p: jr.uniform(key)
+        else:
+            raise ValueError(f"Unknown query strategy: {self.query_strategy}")
 
-    @partial(jax.jit, static_argnames=("k",))
-    def get_batch_queries(self, data: jax.Array, k: int = 1):
-        def merge_superpositions(model_superpos1, model_superpos2):
-            alphas1, betas1 = model_superpos1.trees.alphas, model_superpos1.trees.betas
-            alphas2, betas2 = model_superpos2.trees.alphas, model_superpos2.trees.betas
-            trees = model_superpos1.trees.replace(
-                alphas=jnp.concatenate([alphas1, alphas2], axis=-1),
-                betas=jnp.concatenate([betas1, betas2], axis=-1),
-            )
-            return model_superpos1.replace(trees=trees)
-
-        queries_idx = []
-        model_superpos = self.replace(
-            trees=self.trees.replace(
-                alphas=self.trees.alphas[..., jnp.newaxis],
-                betas=self.trees.betas[..., jnp.newaxis],
-            )
-        )
-
-        for _ in range(k):
-            interests_worst_case = model_superpos.interest_for(data).min(axis=-1)
-            query_idx = interests_worst_case.argmax()
-            queries_idx.append(query_idx)
-
-            model_superpos = merge_superpositions(
-                model_superpos.register(data[query_idx], is_anomaly=True),
-                model_superpos.register(data[query_idx], is_anomaly=False),
-            )
-        return jax.Array(queries_idx)
-
-    @classmethod
-    @partial(
-        jax.jit,
-        static_argnames=("cls", "n_estimators", "max_samples", "hyperplane_components"),
-    )
-    def fit(
-        cls,
-        rng: jax.Array,
-        data: jax.Array,
-        *,
-        max_samples: Optional[int] = None,
-        prior_sample_size=0.1,
-        path_score=False,
-        **kwargs,
-    ):
-        max_samples = max_samples or min((256, data.shape[0]))
-        batch_fit_from_itree = jax.vmap(
-            BalifTree.from_isolation_tree, in_axes=(0, None, None)
-        )
-        itrees = ExtendedIsolationForest.fit(
-            rng, data, max_samples=max_samples, **kwargs
-        ).trees
-
-        max_depth = np.log2(max_samples).astype(int)
-        score_matrix = get_score_matrix(max_depth, max_samples)
-        return cls(
-            trees=batch_fit_from_itree(itrees, score_matrix, prior_sample_size),
-            path_score=path_score,
-        )
+        *batch, dim = data.shape
+        for _ in batch:
+            interest_fn = jax.vmap(interest_fn)
+        return interest_fn(data)
