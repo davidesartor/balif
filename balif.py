@@ -70,16 +70,16 @@ class Balif(IsolationForest):
         forest = super().fit(data, key=key_fit)
 
         def scaled_if_score(tree, node):
-            correction = tree.expected_depth(tree.reached_total[node])
-            normalization = tree.expected_depth(tree.reached_total[0])
+            correction = tree.expected_depth(tree.reached[node])
+            normalization = tree.expected_depth(tree.reached[0])
             score = 2 ** (-(tree.depth(node) + correction) / normalization)
-            max_depth = 1 + jnp.log2(tree.reached_total.shape[-1] + 1)
+            max_depth = 1 + jnp.log2(tree.reached.shape[-1] + 1)
             min_score = 2 ** (-1 - max_depth / normalization)
             max_score = 2 ** (-1 / normalization)
             return jnp.clip((score - min_score) / (max_score - min_score), 0.001, 0.999)
 
         def fit_priors(tree):
-            nodes = jnp.arange(tree.reached_total.shape[-1])
+            nodes = jnp.arange(tree.reached.shape[-1])
             scores = jax.vmap(scaled_if_score, in_axes=(None, 0))(tree, nodes)
             if self.prior_sample_size == "haldane":
                 sample_size = 1e-8
@@ -87,6 +87,10 @@ class Balif(IsolationForest):
                 sample_size = 0.5
             elif self.prior_sample_size == "bayes":
                 sample_size = 1.0
+            elif not isinstance(self.prior_sample_size, float):
+                raise ValueError(f"Unknown prior sample size: {self.prior_sample_size}")
+            else:
+                sample_size = self.prior_sample_size
             sample_size = sample_size / jnp.minimum(scores, 1 - scores)
             return BetaDistribution.from_mean_and_nu(mean=scores, nu=sample_size)
 

@@ -51,7 +51,7 @@ class IsolationTree(eqx.Module):
         key: PRNGKeyArray,
         hyperplane_components: int,
         p_normal_idx: Literal["uniform", "range"],
-        p_normal_value: Literal["uniform", "marginal", "covariant"],
+        p_normal_value: Literal["uniform", "range", "covariant"],
         p_intercept: Literal["uniform", "normal"],
     ):
         samples, dim = data.shape
@@ -73,7 +73,7 @@ class IsolationTree(eqx.Module):
         def sample_normal_values(key, idx):
             if p_normal_value == "uniform":
                 values = jr.normal(key, (hyperplane_components,))
-            elif p_normal_value == "marginal":
+            elif p_normal_value == "range":
                 mean = jnp.zeros((hyperplane_components,))
                 cov = jnp.diag(max_data[idx] - min_data[idx])
                 cov = cov + 1e-8 * jnp.eye(hyperplane_components)
@@ -154,10 +154,10 @@ class IsolationForest(eqx.Module):
     standardize: bool = eqx.field(default=False, static=True)
 
     hyperplane_components: int = eqx.field(default=1, static=True)
-    p_normal_idx: Literal["uniform", "range"] = eqx.field(
+    p_normal_idx: Literal["uniform", "range", "covariant"] = eqx.field(
         default="uniform", static=True
     )
-    p_normal_value: Literal["uniform", "marginal", "covariant"] = eqx.field(
+    p_normal_value: Literal["uniform", "range", "covariant"] = eqx.field(
         default="uniform", static=True
     )
     p_intercept: Literal["uniform", "normal"] = eqx.field(
@@ -197,8 +197,8 @@ class IsolationForest(eqx.Module):
     ) -> Float[Array, "*batch"]:
         def score_fn(tree, point, key) -> Float[Array, ""]:
             isolation_node, _ = tree.path(point, key=key)
-            correction = tree.expected_depth(tree.reached_total[isolation_node])
-            normalization = tree.expected_depth(tree.reached_total[0])
+            correction = tree.expected_depth(tree.reached[isolation_node])
+            normalization = tree.expected_depth(tree.reached[0])
             score = 2 ** (-(tree.depth(isolation_node) + correction) / normalization)
             return score
 
