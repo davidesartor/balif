@@ -54,13 +54,9 @@ class BetaDistribution(eqx.Module):
 
 
 class Balif(IsolationForest):
-    prior_sample_size: Literal["haldane", "jeffreys", "bayes"] | float = eqx.field(
-        default=0.1, static=True
-    )
-    score_reduction: Literal["mean", "mode"] = eqx.field(default="mean", static=True)
-    query_strategy: Literal["random", "anomalous", "margin"] = eqx.field(
-        default="random", static=True
-    )
+    prior_sample_size: Literal["haldane", "jeffreys", "bayes"] | float = 0.1
+    score_reduction: Literal["mean", "mode"] = "mean"
+    query_strategy: Literal["random", "anomalous", "margin"] = "random"
 
     beliefs: BetaDistribution = eqx.field(init=False, default_factory=BetaDistribution)
 
