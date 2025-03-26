@@ -7,8 +7,9 @@ from bad import BayesianDetector
 class BAD_IForest(BayesianDetector, IForest):
     def estimators_apply(
         self, X: Float[np.ndarray, "samples features"]
-    ) -> Int[np.ndarray, "samples estimators"]:
-        return np.stack([est.apply(X) for est in self.estimators_], axis=-1)
+    ) -> Int[np.ndarray, "estimators samples"]:
+        regions = [est.apply(X, check_input=False) for est in self.estimators_]
+        return np.stack(regions, axis=0)
 
     @property
     def regions_score(self) -> Float[np.ndarray, "estimators regions"]:
