@@ -18,13 +18,6 @@ def run_sim(
     strategy,
     seed,
 ):
-    # create save path
-    save_dir = f"results/{dataset}/{strategy}/batch_size_{batch_size}"
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f"{save_dir}/seed_{seed}_{current_time}_avp.txt"
-
     # set seeds
     np.random.seed(seed)
     random.seed(seed)
@@ -32,7 +25,7 @@ def run_sim(
     # load dataset
     X, y = odds_datasets.load(dataset)
     contamination = y.mean()
-    
+
     # fit the unsupervised model
     model = BAD_IForest(
         contamination=contamination,
@@ -40,22 +33,34 @@ def run_sim(
     ).fit(X)
 
     # get and save unsupervised average precision
-    scores0 = model.decision_function(X)
-    avp_0 = average_precision_score(y, scores0)
-    with open(save_path, "a") as f:
-        f.write(f"{avp_0}\n")
+    scores = [model.decision_function(X)]
+    avp = [average_precision_score(y, scores[-1])]
+    queries = []
 
     # run the simulation
     iterations = int(np.ceil(X.shape[0] / batch_size))
     queriable = np.ones(X.shape[0], dtype=bool)
     for _ in tqdm(range(iterations), f"{dataset}: strat={strategy} bs={batch_size}"):
-        batch_idxs = model.get_queries(X[queriable], batch_size)
-        queriable[batch_idxs] = False
-        model.update(X[batch_idxs, :], y[batch_idxs])
-        scores = model.decision_function(X)
-        avp = average_precision_score(y, scores)
-        with open(save_path, "a") as f:
-            f.write(f"{avp}\n")
+        idxs = model.get_queries(X[queriable], batch_size)
+        queriable[queriable][idxs] = False
+        model.update(X[idxs, :], y[idxs])
+
+        queries.append(idxs)
+        scores.append(model.decision_function(X))
+        avp.append(average_precision_score(y, scores[-1]))
+
+    # save results
+    save_dir = f"results/{dataset}/{strategy}/batch_size_{batch_size}"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = f"{save_dir}/seed_{seed}_{current_time}_avp.txt"
+    np.savez_compressed(
+        save_path,
+        avp=np.array(avp),
+        scores=np.array(scores),
+        queries=np.array(queries),
+    )
 
 
 if __name__ == "__main__":
@@ -63,7 +68,7 @@ if __name__ == "__main__":
     batch_sizes = [1, 2, 5, 10]
     strategies = ["worstcase", "average"]
 
-    Parallel(n_jobs=32)(
+    Parallel(n_jobs=8)(
         delayed(run_sim)(
             dataset=dataset,
             batch_size=batch_size,
