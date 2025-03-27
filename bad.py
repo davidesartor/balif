@@ -15,6 +15,9 @@ class BetaDistr(NamedTuple):
     def mean(self):
         return self.a / (self.a + self.b)
 
+    def samplesize(self):
+        return self.a + self.b
+
     def mode(self):
         return np.where(
             np.minimum(self.a, self.b) > 1,
@@ -88,8 +91,10 @@ class EnsembleBeliefs(BetaDistr):
     ) -> Shaped[BetaDistr, "samples *copies"]:
         beliefs = self.gather(samples_regions)
         if method == "sum":
-            a_total = np.sum(beliefs.a, axis=1)
-            b_total = np.sum(beliefs.b, axis=1)
+            mu = np.mean(beliefs.mean(), axis=1)
+            ss = np.sum(beliefs.samplesize(), axis=1)
+            a_total = mu * ss
+            b_total = (1 - mu) * ss
             return BetaDistr(a=a_total, b=b_total)
         elif method == "moment":
             raise NotImplementedError

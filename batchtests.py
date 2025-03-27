@@ -38,14 +38,22 @@ def run_sim(
     queries = []
 
     # run the simulation
-    iterations = int(np.ceil(X.shape[0] / batch_size))
-    queriable = np.ones(X.shape[0], dtype=bool)
+    iterations = int(np.floor(len(X) / batch_size))
+    queriable = np.ones(len(X), dtype=bool)
     for _ in tqdm(range(iterations), f"{dataset}: strat={strategy} bs={batch_size}"):
         idxs = model.get_queries(X[queriable], batch_size)
-        queriable[queriable][idxs] = False
+        idxs = np.arange(len(X))[queriable][idxs]
+        queriable[idxs] = False
         model.update(X[idxs, :], y[idxs])
 
         queries.append(idxs)
+        scores.append(model.decision_function(X))
+        avp.append(average_precision_score(y, scores[-1]))
+
+    # query the remaining samples
+    if np.any(queriable):
+        idxs = np.arange(len(X))[queriable]
+        model.update(X[idxs], y[idxs])
         scores.append(model.decision_function(X))
         avp.append(average_precision_score(y, scores[-1]))
 
@@ -68,7 +76,7 @@ if __name__ == "__main__":
     batch_sizes = [1, 2, 5, 10]
     strategies = ["worstcase", "average"]
 
-    Parallel(n_jobs=8)(
+    Parallel(n_jobs=16)(
         delayed(run_sim)(
             dataset=dataset,
             batch_size=batch_size,
