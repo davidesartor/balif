@@ -1,80 +1,10 @@
+import copy
 from typing import Literal, Optional, NamedTuple
 from jaxtyping import Float, Int, Shaped
 
 import numpy as np
 from scipy.stats import beta
 from pyod.models.base import BaseDetector
-
-
-class BayesianDetector(BaseDetector):
-    @property
-    def regions_score(self) -> Float[np.ndarray, "estimators regions"]:
-        raise NotImplementedError
-
-    def estimators_apply(
-        self, X: Float[np.ndarray, "samples features"]
-    ) -> Int[np.ndarray, "samples estimators"]:
-        raise NotImplementedError
-
-    def __init__(
-        self,
-        *args,
-        prior_sample_size: float = 0.1,
-        aggregation_method: Literal["sum", "moment"] = "sum",
-        interest_method: Literal["margin", "anom"] = "margin",
-        reprocess_decision_scores: bool = True,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.prior_sample_size = prior_sample_size
-        self.aggregation_method: Literal["sum", "moment"] = aggregation_method
-        self.interest_method: Literal["margin", "anom"] = interest_method
-        self.reprocess_decision_scores = reprocess_decision_scores
-
-    def fit(
-        self,
-        X: Float[np.ndarray, "samples features"],
-        y: Optional[Int[np.ndarray, "samples 1"]] = None,
-    ):
-        super().fit(X, y)
-        self.beliefs = EnsembleBeliefs.from_scores(
-            regions_score=self.regions_score,
-            contamination=self.contamination,
-            prior_sample_size=self.prior_sample_size,
-        )
-        if self.reprocess_decision_scores:
-            self.decision_scores_ = self.decision_function(X)
-            self._process_decision_scores()
-        return self
-
-    def decision_function(
-        self, X: Float[np.ndarray, "samples features"]
-    ) -> Float[np.ndarray, "samples"]:
-        regions = self.estimators_apply(X)
-        beliefs = self.beliefs.aggregate(regions, self.aggregation_method)
-        scores = beliefs.mean()
-        return scores
-
-    def update(
-        self,
-        X: Float[np.ndarray, "samples features"],
-        y: Int[np.ndarray, "samples 1"],
-        confidence: float | Float[np.ndarray, "#samples"] = 1.0,
-    ):
-        regions = self.estimators_apply(X)
-        da = confidence * (y >= 1).flatten()
-        db = confidence * (y == 0).flatten()
-        self.beliefs.update(regions, da, db)
-
-    def interest(self, X: Float[np.ndarray, "samples features"]) -> Float[np.ndarray, "samples"]:
-        regions = self.estimators_apply(X)
-        beliefs = self.beliefs.aggregate(regions, method=self.aggregation_method)
-        if self.interest_method == "margin":
-            return np.exp(-beliefs.log_margin())
-        elif self.interest_method == "anom":
-            return beliefs.mean()
-        else:
-            raise ValueError(f"Unknown interest method: {self.interest_method}")
 
 
 class BetaDistr(NamedTuple):
@@ -164,3 +94,124 @@ class EnsembleBeliefs(BetaDistr):
             raise NotImplementedError
         else:
             raise ValueError(f"Unknown aggregation method: {method}")
+
+
+class BayesianDetector(BaseDetector):
+    @property
+    def regions_score(self) -> Float[np.ndarray, "estimators regions"]:
+        raise NotImplementedError
+
+    def estimators_apply(
+        self, X: Float[np.ndarray, "samples features"]
+    ) -> Int[np.ndarray, "samples estimators"]:
+        raise NotImplementedError
+
+    def __init__(
+        self,
+        *args,
+        prior_sample_size: float = 0.1,
+        aggregation_method: Literal["sum", "moment"] = "sum",
+        interest_method: Literal["margin", "anom"] = "margin",
+        batch_query_method: Literal["worstcase", "average"] = "worstcase",
+        reprocess_decision_scores: bool = True,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.prior_sample_size = prior_sample_size
+        self.aggregation_method: Literal["sum", "moment"] = aggregation_method
+        self.interest_method: Literal["margin", "anom"] = interest_method
+        self.reprocess_decision_scores = reprocess_decision_scores
+        self.batch_query_method: Literal["worstcase", "average"] = batch_query_method
+
+    def fit(
+        self,
+        X: Float[np.ndarray, "samples features"],
+        y: Optional[Int[np.ndarray, "samples 1"]] = None,
+    ):
+        super().fit(X, y)
+        self.ensemble_beliefs = EnsembleBeliefs.from_scores(
+            regions_score=self.regions_score,
+            contamination=self.contamination,
+            prior_sample_size=self.prior_sample_size,
+        )
+        if self.reprocess_decision_scores:
+            self.decision_scores_ = self.decision_function(X)
+            self._process_decision_scores()
+        return self
+
+    def decision_function(
+        self,
+        X: Float[np.ndarray, "samples features"],
+    ) -> Float[np.ndarray, "samples"]:
+        regions = self.estimators_apply(X)
+        beliefs = self.ensemble_beliefs.aggregate(regions, self.aggregation_method)
+        scores = beliefs.mean()
+        return scores
+
+    def update(
+        self,
+        X: Float[np.ndarray, "samples features"],
+        y: Int[np.ndarray, "samples 1"],
+        confidence: float | Float[np.ndarray, "#samples"] = 1.0,
+    ):
+        da = confidence * (y >= 1).flatten()
+        db = confidence * (y == 0).flatten()
+        regions = self.estimators_apply(X)
+        self.ensemble_beliefs.update(regions, da, db)
+
+    def interest(
+        self,
+        X: Float[np.ndarray, "samples features"],
+        ensemble_beliefs: Optional[EnsembleBeliefs] = None,
+    ) -> Float[np.ndarray, "samples"]:
+        regions = self.estimators_apply(X)
+        ensemble_beliefs = ensemble_beliefs or self.ensemble_beliefs
+
+        beliefs = ensemble_beliefs.aggregate(regions, method=self.aggregation_method)
+        if self.interest_method == "margin":
+            return np.exp(-beliefs.log_margin())
+        elif self.interest_method == "anom":
+            return beliefs.mean()
+        else:
+            raise ValueError(f"Unknown interest method: {self.interest_method}")
+
+    def get_queries(self, X: Float[np.ndarray, "samples features"], batch_size: int = 1) -> Float:
+        # initialize the superposition model
+        beliefs_superposition = EnsembleBeliefs(
+            a=self.ensemble_beliefs.a[None, ...],
+            b=self.ensemble_beliefs.b[None, ...],
+        )
+
+        queries_idx = []
+        queriable = np.ones(X.shape[0], dtype=bool)
+        weights = np.ones(1)
+        c = self.contamination
+
+        for i in range(batch_size):
+            # compute the interest of each sample
+            if self.batch_query_method == "worstcase":
+                interest = self.interest(X, beliefs_superposition)
+                interest = interest.min(axis=-1)
+            elif self.batch_query_method == "average":
+                interest = self.interest(X, beliefs_superposition)
+                interest = np.sum(interest * weights, axis=-1)
+                weights = np.concatenate([weights * c, weights * (1 - c)], axis=-1)
+            else:
+                raise ValueError(f"Unknown method: {self.batch_query_method}")
+
+            # query the most interesting sample
+            query_idx = np.where(queriable, interest, -np.inf).argmax()
+            queriable[query_idx] = False
+            queries_idx.append(query_idx)
+
+            # update the superposition model
+            regions = self.estimators_apply(X[query_idx].reshape(1, -1))
+            superposition1 = copy.deepcopy(beliefs_superposition)
+            superposition2 = copy.deepcopy(beliefs_superposition)
+            superposition1.update(regions, da=np.ones(1), db=np.zeros(1))
+            superposition2.update(regions, da=np.zeros(1), db=np.ones(1))
+            beliefs_superposition = EnsembleBeliefs(
+                a=np.concatenate([superposition1.a, superposition2.a]),
+                b=np.concatenate([superposition1.b, superposition2.b]),
+            )
+        return np.array(queries_idx)
