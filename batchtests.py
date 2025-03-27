@@ -28,7 +28,7 @@ def run_sim(X, y, batch_size, strategy, seed=0, contamination_factor=0.1, query_
     random.seed(seed) 
 
     # fit the unsupervised model
-    model = BAD_IForest().fit(X)
+    model = BAD_IForest(contamination=contamination_factor).fit(X)
     
     # get and save unsupervised average precision
     scores0 = model.decision_function(X)
@@ -40,10 +40,7 @@ def run_sim(X, y, batch_size, strategy, seed=0, contamination_factor=0.1, query_
     queriable = np.ones(X.shape[0], dtype=bool)
 
     for _ in range(iterations): 
-        if query_multiple: 
-            queriable = None        # set queriable to None so get_batch_queries knows to return all samples
-        
-        batch_idxs = model.get_batch_queries(X, batch_size, strategy=strategy, queriable=queriable, contamination_factor=contamination_factor)
+        batch_idxs = model.get_queries(X[queriable], batch_size)
         queriable[batch_idxs] = False
         model.update(X[batch_idxs,:], y[batch_idxs])
         scores = model.decision_function(X)

@@ -36,7 +36,7 @@ def load(dataset_name=None, scale=False):
     data, labels = mat["X"], mat["y"][:, 0]
     if scale:
         data = (data - data.mean(axis=0)) / data.std(axis=0)
-    return np.array(data, dtype=float), np.array(labels, dtype=bool)
+    return np.array(data, dtype=np.float32), np.array(labels, dtype=bool)
 
 
 def load_as_train_test(dataset_name=None, scale=False, **kwargs):
