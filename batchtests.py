@@ -62,7 +62,7 @@ def run_sim(
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f"{save_dir}/seed_{seed}_{current_time}_avp.txt"
+    save_path = f"{save_dir}/seed_{seed}_{current_time}"
     np.savez_compressed(
         save_path,
         avp=np.array(avp),
@@ -74,16 +74,16 @@ def run_sim(
 if __name__ == "__main__":
     seeds = [0, 1, 2, 3, 4]
     batch_sizes = [1, 2, 5, 10]
-    strategies = ["worstcase", "average"]
+    strategies = ["worstcase", "average", "independent"]
 
-    Parallel(n_jobs=16)(
+    Parallel(n_jobs=8)(
         delayed(run_sim)(
             dataset=dataset,
             batch_size=batch_size,
             strategy=strategy,
             seed=seed,
         )
-        for dataset, batch_size, strategy, seed in itertools.product(
-            odds_datasets.datasets_names, batch_sizes, strategies, seeds
+        for batch_size, dataset, strategy, seed in itertools.product(
+            batch_sizes, odds_datasets.datasets_names, strategies, seeds
         )
     )

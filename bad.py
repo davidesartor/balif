@@ -118,7 +118,7 @@ class BayesianDetector(BaseDetector):
         prior_sample_size: float = 0.1,
         aggregation_method: Literal["sum", "moment"] = "sum",
         interest_method: Literal["margin", "anom"] = "margin",
-        batch_query_method: Literal["worstcase", "average"] = "worstcase",
+        batch_query_method: Literal["worstcase", "average", "independent"] = "worstcase",
         reprocess_decision_scores: bool = True,
         **kwargs,
     ):
@@ -127,7 +127,7 @@ class BayesianDetector(BaseDetector):
         self.aggregation_method: Literal["sum", "moment"] = aggregation_method
         self.interest_method: Literal["margin", "anom"] = interest_method
         self.reprocess_decision_scores = reprocess_decision_scores
-        self.batch_query_method: Literal["worstcase", "average"] = batch_query_method
+        self.batch_query_method: Literal["worstcase", "average", "independent"] = batch_query_method
 
     def fit(
         self,
@@ -182,6 +182,10 @@ class BayesianDetector(BaseDetector):
             raise ValueError(f"Unknown interest method: {self.interest_method}")
 
     def get_queries(self, X: Float[np.ndarray, "samples features"], batch_size: int = 1) -> Float:
+        if self.batch_query_method == "independent":
+            idxs = self.interest(X).argsort()[-batch_size:]
+            return idxs
+
         # initialize the superposition model
         beliefs_superposition = EnsembleBeliefs(
             a=self.ensemble_beliefs.a[None, ...].copy(),
