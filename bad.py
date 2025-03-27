@@ -2,6 +2,7 @@ from typing import Literal, Optional, NamedTuple
 from jaxtyping import Float, Int, Shaped
 
 import numpy as np
+from scipy.stats import beta
 from pyod.models.base import BaseDetector
 
 
@@ -18,14 +19,16 @@ class BayesianDetector(BaseDetector):
     def __init__(
         self,
         *args,
-        prior_sample_size=0.1,
-        aggregation_method="arithmetic_mean",
-        reprocess_decision_scores=True,
+        prior_sample_size: float = 0.1,
+        aggregation_method: Literal["sum", "moment"] = "sum",
+        interest_method: Literal["margin", "anom"] = "margin",
+        reprocess_decision_scores: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.prior_sample_size = prior_sample_size
-        self.aggregation_method = aggregation_method
+        self.aggregation_method: Literal["sum", "moment"] = aggregation_method
+        self.interest_method: Literal["margin", "anom"] = interest_method
         self.reprocess_decision_scores = reprocess_decision_scores
 
     def fit(
@@ -48,7 +51,8 @@ class BayesianDetector(BaseDetector):
         self, X: Float[np.ndarray, "samples features"]
     ) -> Float[np.ndarray, "samples"]:
         regions = self.estimators_apply(X)
-        scores = self.beliefs.aggregate(regions, self.aggregation_method)
+        beliefs = self.beliefs.aggregate(regions, self.aggregation_method)
+        scores = beliefs.mean()
         return scores
 
     def update(
@@ -62,6 +66,16 @@ class BayesianDetector(BaseDetector):
         db = confidence * (y == 0).flatten()
         self.beliefs.update(regions, da, db)
 
+    def interest(self, X: Float[np.ndarray, "samples features"]) -> Float[np.ndarray, "samples"]:
+        regions = self.estimators_apply(X)
+        beliefs = self.beliefs.aggregate(regions, method=self.aggregation_method)
+        if self.interest_method == "margin":
+            return np.exp(-beliefs.log_margin())
+        elif self.interest_method == "anom":
+            return beliefs.mean()
+        else:
+            raise ValueError(f"Unknown interest method: {self.interest_method}")
+
 
 class BetaDistr(NamedTuple):
     a: Float[np.ndarray, "..."]
@@ -70,10 +84,20 @@ class BetaDistr(NamedTuple):
     def mean(self):
         return self.a / (self.a + self.b)
 
+    def mode(self):
+        return np.where(
+            np.minimum(self.a, self.b) > 1,
+            (self.a - 1) / (self.a + self.b - 2),
+            (self.a > self.b).astype(float),
+        )
+
+    def log_margin(self, r: float = 0.5):
+        return beta.logpdf(self.mode(), self.a, self.b) - beta.logpdf(r, self.a, self.b)
+
 
 class EnsembleBeliefs(BetaDistr):
-    a: Float[np.ndarray, "estimators regions"]
-    b: Float[np.ndarray, "estimators regions"]
+    a: Float[np.ndarray, "*copies estimators regions"]
+    b: Float[np.ndarray, "*copies estimators regions"]
 
     @classmethod
     def from_scores(
@@ -93,32 +117,50 @@ class EnsembleBeliefs(BetaDistr):
         b = np.maximum(prior_a / a_over_b, prior_b)
         return cls(a=a, b=b)
 
+    def gather(
+        self, samples_regions: Int[np.ndarray, "samples estimators"]
+    ) -> Shaped[BetaDistr, "samples estimators *copies"]:
+        # if multiple model copies, add trailing dimensions
+        while samples_regions.ndim < self.a.ndim:
+            samples_regions = samples_regions[..., None]
+
+        # gather beliefs for each sample and estimator (and copy)
+        a = np.take_along_axis(self.a.T, samples_regions, axis=0)
+        b = np.take_along_axis(self.b.T, samples_regions, axis=0)
+        return BetaDistr(a=a, b=b)
+
     def update(
         self,
         samples_regions: Int[np.ndarray, "samples estimators"],
         da: Float[np.ndarray, "samples"],
         db: Float[np.ndarray, "samples"],
     ):
-        a, b = self.gather(samples_regions)
-        a = a + da[:, None]
-        b = b + db[:, None]
-        np.put_along_axis(self.a.T, samples_regions, a, axis=0)
-        np.put_along_axis(self.b.T, samples_regions, b, axis=0)
+        # if multiple model copies, add trailing dimensions
+        while samples_regions.ndim < self.a.ndim:
+            samples_regions = samples_regions[..., None]
+            da = da[..., None]
+            db = db[..., None]
 
-    def gather(
-        self, samples_regions: Int[np.ndarray, "samples estimators"]
-    ) -> Shaped[BetaDistr, "samples estimators"]:
-        a = np.take_along_axis(self.a.T, samples_regions, axis=0)
-        b = np.take_along_axis(self.b.T, samples_regions, axis=0)
-        return BetaDistr(a=a, b=b)
+        # gather and modify only the relevant parameters
+        a_to_update, b_to_update = self.gather(samples_regions)
+        a_updated = a_to_update + da[..., None]
+        b_updated = b_to_update + db[..., None]
+
+        # update the beliefs
+        np.put_along_axis(self.a.T, samples_regions, a_updated, axis=0)
+        np.put_along_axis(self.b.T, samples_regions, b_updated, axis=0)
 
     def aggregate(
-        self, samples_regions: Int[np.ndarray, "samples estimators"], method: str
-    ) -> Float[np.ndarray, "samples"]:
+        self,
+        samples_regions: Int[np.ndarray, "samples estimators"],
+        method: Literal["sum", "moment"],
+    ) -> Shaped[BetaDistr, "samples *copies"]:
         beliefs = self.gather(samples_regions)
-        if method == "arithmetic_mean":
-            return np.mean(beliefs.mean(), axis=-1)
-        elif method == "geometric_mean":
-            return np.exp(np.mean(np.log(beliefs.mean()), axis=-1))
+        if method == "sum":
+            a_total = np.sum(beliefs.a, axis=1)
+            b_total = np.sum(beliefs.b, axis=1)
+            return BetaDistr(a=a_total, b=b_total)
+        elif method == "moment":
+            raise NotImplementedError
         else:
             raise ValueError(f"Unknown aggregation method: {method}")
