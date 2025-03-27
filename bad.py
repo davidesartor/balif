@@ -1,7 +1,8 @@
-import copy
 from typing import Literal, Optional, NamedTuple
 from jaxtyping import Float, Int, Shaped
 
+
+import copy
 import numpy as np
 from scipy.stats import beta
 from pyod.models.base import BaseDetector
@@ -178,8 +179,8 @@ class BayesianDetector(BaseDetector):
     def get_queries(self, X: Float[np.ndarray, "samples features"], batch_size: int = 1) -> Float:
         # initialize the superposition model
         beliefs_superposition = EnsembleBeliefs(
-            a=self.ensemble_beliefs.a[None, ...],
-            b=self.ensemble_beliefs.b[None, ...],
+            a=self.ensemble_beliefs.a[None, ...].copy(),
+            b=self.ensemble_beliefs.b[None, ...].copy(),
         )
 
         queries_idx = []
@@ -206,12 +207,11 @@ class BayesianDetector(BaseDetector):
 
             # update the superposition model
             regions = self.estimators_apply(X[query_idx].reshape(1, -1))
-            superposition1 = copy.deepcopy(beliefs_superposition)
-            superposition2 = copy.deepcopy(beliefs_superposition)
-            superposition1.update(regions, da=np.ones(1), db=np.zeros(1))
-            superposition2.update(regions, da=np.zeros(1), db=np.ones(1))
+            other_superposition = copy.deepcopy(beliefs_superposition)
+            beliefs_superposition.update(regions, da=np.ones(1), db=np.zeros(1))
+            other_superposition.update(regions, da=np.zeros(1), db=np.ones(1))
             beliefs_superposition = EnsembleBeliefs(
-                a=np.concatenate([superposition1.a, superposition2.a]),
-                b=np.concatenate([superposition1.b, superposition2.b]),
+                a=np.concatenate([beliefs_superposition.a, other_superposition.a]),
+                b=np.concatenate([beliefs_superposition.b, other_superposition.b]),
             )
         return np.array(queries_idx)
