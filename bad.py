@@ -52,47 +52,43 @@ class EnsembleBeliefs(BetaDistr):
         return cls(a=a, b=b)
 
     def gather(
-        self, samples_regions: Int[np.ndarray, "samples estimators"]
-    ) -> Shaped[BetaDistr, "samples estimators *copies"]:
-        # if multiple model copies, add trailing dimensions
-        while samples_regions.ndim < self.a.ndim:
-            samples_regions = samples_regions[..., None]
+        self, regions: Int[np.ndarray, "estimators samples"]
+    ) -> Shaped[BetaDistr, "*copies estimators samples"]:
+        # if multiple model copies, add leading dimensions
+        while regions.ndim < self.a.ndim:
+            regions = regions[None, ...]
 
         # gather beliefs for each sample and estimator (and copy)
-        a = np.take_along_axis(self.a.T, samples_regions, axis=0)
-        b = np.take_along_axis(self.b.T, samples_regions, axis=0)
+        a = np.take_along_axis(self.a, regions, axis=-1)
+        b = np.take_along_axis(self.b, regions, axis=-1)
         return BetaDistr(a=a, b=b)
 
     def update(
         self,
-        samples_regions: Int[np.ndarray, "samples estimators"],
+        regions: Int[np.ndarray, "estimators samples"],
         da: Float[np.ndarray, "samples"],
         db: Float[np.ndarray, "samples"],
     ):
-        # if multiple model copies, add trailing dimensions
-        while samples_regions.ndim < self.a.ndim:
-            samples_regions = samples_regions[..., None]
-            da = da[..., None]
-            db = db[..., None]
+        # if multiple model copies, add leading dimensions
+        while regions.ndim < self.a.ndim:
+            regions = regions[None, ...]
 
-        # gather and modify only the relevant parameters
-        a_to_update, b_to_update = self.gather(samples_regions)
-        a_updated = a_to_update + da[..., None]
-        b_updated = b_to_update + db[..., None]
-
-        # update the beliefs
-        np.put_along_axis(self.a.T, samples_regions, a_updated, axis=0)
-        np.put_along_axis(self.b.T, samples_regions, b_updated, axis=0)
+        # updata one point at a time to avoid overwriting
+        for i in range(regions.shape[-1]):
+            sample_regions = regions[..., i:i+1]
+            a, b = self.gather(sample_regions)
+            np.put_along_axis(self.a, sample_regions, a + da[i], axis=-1)
+            np.put_along_axis(self.b, sample_regions, b + db[i], axis=-1)
 
     def aggregate(
         self,
-        samples_regions: Int[np.ndarray, "samples estimators"],
+        regions: Int[np.ndarray, "estimators samples"],
         method: Literal["sum", "moment"],
-    ) -> Shaped[BetaDistr, "samples *copies"]:
-        beliefs = self.gather(samples_regions)
+    ) -> Shaped[BetaDistr, "*copies samples"]:
+        beliefs = self.gather(regions)
         if method == "sum":
-            mu = np.mean(beliefs.mean(), axis=1)
-            ss = np.sum(beliefs.samplesize(), axis=1)
+            mu = np.mean(beliefs.mean(), axis=-2)
+            ss = np.sum(beliefs.samplesize(), axis=-2)
             a_total = mu * ss
             b_total = (1 - mu) * ss
             return BetaDistr(a=a_total, b=b_total)
@@ -109,7 +105,7 @@ class BayesianDetector(BaseDetector):
 
     def estimators_apply(
         self, X: Float[np.ndarray, "samples features"]
-    ) -> Int[np.ndarray, "samples estimators"]:
+    ) -> Int[np.ndarray, "estimators samples"]:
         raise NotImplementedError
 
     def __init__(
@@ -157,11 +153,11 @@ class BayesianDetector(BaseDetector):
     def update(
         self,
         X: Float[np.ndarray, "samples features"],
-        y: Int[np.ndarray, "samples 1"],
+        y: Int[np.ndarray, "samples"],
         confidence: float | Float[np.ndarray, "#samples"] = 1.0,
     ):
-        da = confidence * (y >= 1).flatten()
-        db = confidence * (y == 0).flatten()
+        da = confidence * (y >= 1)
+        db = confidence * (y == 0)
         regions = self.estimators_apply(X)
         self.ensemble_beliefs.update(regions, da, db)
 
@@ -169,10 +165,9 @@ class BayesianDetector(BaseDetector):
         self,
         X: Float[np.ndarray, "samples features"],
         ensemble_beliefs: Optional[EnsembleBeliefs] = None,
-    ) -> Float[np.ndarray, "samples"]:
+    ) -> Float[np.ndarray, "*copies samples"]:
         regions = self.estimators_apply(X)
         ensemble_beliefs = ensemble_beliefs or self.ensemble_beliefs
-
         beliefs = ensemble_beliefs.aggregate(regions, method=self.aggregation_method)
         if self.interest_method == "margin":
             return np.exp(-beliefs.log_margin())
@@ -181,7 +176,11 @@ class BayesianDetector(BaseDetector):
         else:
             raise ValueError(f"Unknown interest method: {self.interest_method}")
 
-    def get_queries(self, X: Float[np.ndarray, "samples features"], batch_size: int = 1) -> Float:
+    def get_queries(
+        self,
+        X: Float[np.ndarray, "samples features"],
+        batch_size: int = 1,
+    ) -> Int[np.ndarray, "batch_size"]:
         if self.batch_query_method == "independent":
             idxs = self.interest(X).argsort()[-batch_size:]
             return idxs
@@ -194,18 +193,18 @@ class BayesianDetector(BaseDetector):
 
         queries_idx = []
         queriable = np.ones(X.shape[0], dtype=bool)
-        weights = np.ones(1)
+        weights = np.ones((1, 1))
         c = self.contamination
 
         for i in range(batch_size):
             # compute the interest of each sample
             if self.batch_query_method == "worstcase":
                 interest = self.interest(X, beliefs_superposition)
-                interest = interest.min(axis=-1)
+                interest = interest.min(axis=0)
             elif self.batch_query_method == "average":
                 interest = self.interest(X, beliefs_superposition)
-                interest = np.sum(interest * weights, axis=-1)
-                weights = np.concatenate([weights * c, weights * (1 - c)], axis=-1)
+                interest = np.sum(interest * weights, axis=0)
+                weights = np.concatenate([weights * c, weights * (1 - c)])
             else:
                 raise ValueError(f"Unknown method: {self.batch_query_method}")
 
