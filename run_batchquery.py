@@ -32,11 +32,10 @@ def run_sim(
     ).fit(X_train)
 
     # get and save unsupervised average precision
-    scores_train = [model.decision_function(X_train)]
-    scores_test = [model.decision_function(X_test)]
-    avp_train = [average_precision_score(y_train, scores_train[-1])]
-    avp_test = [average_precision_score(y_test, scores_test[-1])]
-    queries = []
+    scores_train = model.decision_function(X_train)
+    scores_test = model.decision_function(X_test)
+    avp_train = [average_precision_score(y_train, scores_train)]
+    avp_test = [average_precision_score(y_test, scores_test)]
 
     # run the simulation
     iterations = int(np.floor(len(X_train) / batch_size))
@@ -47,20 +46,19 @@ def run_sim(
         queriable[idxs] = False
         model.update(X_train[idxs, :], y_train[idxs])
 
-        queries.append(idxs)
-        scores_train.append(model.decision_function(X_train))
-        scores_test.append(model.decision_function(X_test))
-        avp_train.append(average_precision_score(y_train, scores_train[-1]))
-        avp_test.append(average_precision_score(y_test, scores_test[-1]))
+        scores_train = model.decision_function(X_train)
+        scores_test = model.decision_function(X_test)
+        avp_train.append(average_precision_score(y_train, scores_train))
+        avp_test.append(average_precision_score(y_test, scores_test))
 
     # query the remaining samples
     if np.any(queriable):
         idxs = np.arange(len(X_train))[queriable]
         model.update(X_train[idxs], y_train[idxs])
-        scores_train.append(model.decision_function(X_train))
-        scores_test.append(model.decision_function(X_test))
-        avp_train.append(average_precision_score(y_train, scores_train[-1]))
-        avp_test.append(average_precision_score(y_test, scores_test[-1]))
+        scores_train = model.decision_function(X_train)
+        scores_test = model.decision_function(X_test)
+        avp_train.append(average_precision_score(y_train, scores_train))
+        avp_test.append(average_precision_score(y_test, scores_test))
 
     # save results
     save_dir = f"results/{dataset}/{strategy}/batch_size_{batch_size}"
@@ -71,10 +69,7 @@ def run_sim(
     np.savez_compressed(
         save_path,
         avp_train=np.array(avp_train),
-        avp_test=np.array(avp_test),
-        scores_train=np.array(scores_train),
-        scores_test=np.array(scores_test),
-        queries=np.array(queries),
+        avp_test=np.array(avp_test)
     )
 
 
@@ -83,14 +78,14 @@ if __name__ == "__main__":
     batch_sizes = [1, 2, 5, 10]
     strategies = ["worstcase", "average", "independent"]
 
-    Parallel(n_jobs=4)(
+    Parallel(n_jobs=10)(
         delayed(run_sim)(
             dataset=dataset,
             batch_size=batch_size,
             strategy=strategy,
             seed=seed,
         )
-        for batch_size, dataset, strategy, seed in itertools.product(
-            batch_sizes, odds_datasets.datasets_names, strategies, seeds
+        for dataset, batch_size, strategy, seed in itertools.product(
+            odds_datasets.datasets_names, batch_sizes, strategies, seeds
         )
     )
