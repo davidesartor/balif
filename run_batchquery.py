@@ -3,10 +3,8 @@ import itertools
 from joblib import Parallel, delayed
 import numpy as np
 import os
-import random
 from tqdm import tqdm
-
-
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
 from iforest import BAD_IForest
 import odds_datasets
@@ -16,13 +14,17 @@ def run_sim(
     dataset,
     batch_size,
     strategy,
+    data_copies,
     seed,
 ):
     # load dataset
-    (X_train, X_test, y_train, y_test) = odds_datasets.load_as_train_test(
-        dataset, random_state=seed, test_size=0.5
+    X, y = odds_datasets.load(dataset)
+    contamination = y.mean()
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.5, random_state=seed, stratify=y
     )
-    contamination = (y_train.mean() + y_test.mean()) / 2
+    X_train = np.concatenate([X_train] * data_copies, axis=0)
+    y_train = np.concatenate([y_train] * data_copies, axis=0)
 
     # fit the unsupervised model
     model = BAD_IForest(
@@ -61,22 +63,19 @@ def run_sim(
         avp_test.append(average_precision_score(y_test, scores_test))
 
     # save results
-    save_dir = f"results/{dataset}/{strategy}/batch_size_{batch_size}"
+    save_dir = f"results/{dataset}x{data_copies}/{strategy}/batch_size_{batch_size}"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_path = f"{save_dir}/seed_{seed}_{current_time}"
-    np.savez_compressed(
-        save_path,
-        avp_train=np.array(avp_train),
-        avp_test=np.array(avp_test)
-    )
+    np.savez_compressed(save_path, avp_train=np.array(avp_train), avp_test=np.array(avp_test))
 
 
 if __name__ == "__main__":
-    seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    seeds = [0, 1, 2, 3, 4]
     batch_sizes = [1, 2, 5, 10]
     strategies = ["worstcase", "average", "independent"]
+    data_copies = [1, 5]
 
     Parallel(n_jobs=10)(
         delayed(run_sim)(
@@ -84,8 +83,9 @@ if __name__ == "__main__":
             batch_size=batch_size,
             strategy=strategy,
             seed=seed,
+            data_copies=copies,
         )
-        for dataset, batch_size, strategy, seed in itertools.product(
-            odds_datasets.datasets_names, batch_sizes, strategies, seeds
+        for dataset, copies, batch_size, strategy, seed in itertools.product(
+            odds_datasets.datasets_names, data_copies, batch_sizes, strategies, seeds
         )
     )

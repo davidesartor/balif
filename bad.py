@@ -75,7 +75,7 @@ class EnsembleBeliefs(BetaDistr):
 
         # updata one point at a time to avoid overwriting
         for i in range(regions.shape[-1]):
-            sample_regions = regions[..., i:i+1]
+            sample_regions = regions[..., i : i + 1]
             a, b = self.gather(sample_regions)
             np.put_along_axis(self.a, sample_regions, a + da[i], axis=-1)
             np.put_along_axis(self.b, sample_regions, b + db[i], axis=-1)
@@ -111,11 +111,14 @@ class BayesianDetector(BaseDetector):
     def __init__(
         self,
         *args,
+        reprocess_decision_scores: bool = True,
         prior_sample_size: float = 0.1,
         aggregation_method: Literal["sum", "moment"] = "sum",
         interest_method: Literal["margin", "anom"] = "margin",
-        batch_query_method: Literal["worstcase", "average", "independent"] = "worstcase",
-        reprocess_decision_scores: bool = True,
+        batch_query_method: Literal[
+            "worstcase", "average", "bestcase", "independent"
+        ] = "independent",
+        
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -123,7 +126,9 @@ class BayesianDetector(BaseDetector):
         self.aggregation_method: Literal["sum", "moment"] = aggregation_method
         self.interest_method: Literal["margin", "anom"] = interest_method
         self.reprocess_decision_scores = reprocess_decision_scores
-        self.batch_query_method: Literal["worstcase", "average", "independent"] = batch_query_method
+        self.batch_query_method: Literal[
+            "worstcase", "average", "bestcase", "independent"
+        ] = batch_query_method
 
     def fit(
         self,
@@ -201,6 +206,9 @@ class BayesianDetector(BaseDetector):
             if self.batch_query_method == "worstcase":
                 interest = self.interest(X, beliefs_superposition)
                 interest = interest.min(axis=0)
+            elif self.batch_query_method == "bestcase":
+                interest = self.interest(X, beliefs_superposition)
+                interest = interest.max(axis=0)
             elif self.batch_query_method == "average":
                 interest = self.interest(X, beliefs_superposition)
                 interest = np.sum(interest * weights, axis=0)

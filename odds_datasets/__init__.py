@@ -2,8 +2,6 @@ import scipy.io
 import os
 import numpy as np
 
-from sklearn.model_selection import train_test_split
-
 small_datasets_names = [
     "wine",
     "vertebral",
@@ -13,7 +11,12 @@ small_datasets_names = [
     "pima",
 ]
 
-medium_datasets_names = ["vowels", "letter", "cardio", "thyroid"]
+medium_datasets_names = [
+    "vowels",
+    "letter",
+    "cardio",
+    "thyroid",
+]
 
 large_datasets_names = [
     "optdigits",
@@ -30,15 +33,8 @@ datasets_names = small_datasets_names + medium_datasets_names + large_datasets_n
 
 
 def load(dataset_name=None, scale=False):
-    mat = scipy.io.loadmat(
-        os.path.join(os.path.dirname(__file__), f"{dataset_name}.mat")
-    )
+    mat = scipy.io.loadmat(os.path.join(os.path.dirname(__file__), f"{dataset_name}.mat"))
     data, labels = mat["X"], mat["y"][:, 0]
     if scale:
         data = (data - data.mean(axis=0)) / data.std(axis=0)
     return np.array(data, dtype=np.float32), np.array(labels, dtype=bool)
-
-
-def load_as_train_test(dataset_name=None, scale=False, **kwargs):
-    data, labels = load(dataset_name, scale)
-    return train_test_split(data, labels, stratify=labels, **kwargs)
