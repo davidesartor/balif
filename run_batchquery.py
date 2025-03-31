@@ -72,11 +72,7 @@ def run_sim(
 
 
 if __name__ == "__main__":
-    seeds = [0, 1, 2, 3, 4]
-    batch_sizes = [1, 2, 5, 10]
-    strategies = ["worstcase", "average", "independent"]
-    data_copies = [1, 5]
-
+    # run small datasets
     Parallel(n_jobs=10)(
         delayed(run_sim)(
             dataset=dataset,
@@ -85,7 +81,25 @@ if __name__ == "__main__":
             seed=seed,
             data_copies=copies,
         )
-        for dataset, copies, batch_size, strategy, seed in itertools.product(
-            odds_datasets.datasets_names, data_copies, batch_sizes, strategies, seeds
+        for dataset in odds_datasets.small_datasets_names + odds_datasets.medium_datasets_names
+        for copies in [1, 2, 5, 10]
+        for batch_size in [1, 2, 5, 10]
+        for strategy in ["worstcase", "average", "bestcase", "independent"]
+        for seed in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    )
+
+    # run large datasets
+    Parallel(n_jobs=10)(
+        delayed(run_sim)(
+            dataset=dataset,
+            batch_size=batch_size,
+            strategy=strategy,
+            seed=seed,
+            data_copies=copies,
         )
+        for dataset in odds_datasets.small_datasets_names + odds_datasets.medium_datasets_names
+        for copies in [1, 2]
+        for batch_size in [1, 2, 5]
+        for strategy in ["worstcase", "average", "independent"]
+        for seed in [0, 1, 2, 3, 4]
     )
