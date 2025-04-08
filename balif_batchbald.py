@@ -12,7 +12,7 @@ class CandidateBatch(NamedTuple):
     scores: np.ndarray
     indices: np.ndarray
 
-
+# ------------------- ClosedBALD -------------------#
 def compute_conditional_entropy(alphas, betas): 
     """
     Compute E_w[H(y|x,w)] assuming w~Beta(alpha, beta) and y|w~Bernoulli(w).
@@ -65,8 +65,19 @@ def bald_scores(alphas, betas):
     scores = compute_entropy(alphas, betas) - compute_conditional_entropy(alphas, betas)
     return scores
     
-
-def get_balif_bald_batch(alphas, betas, batch_size:int=1): 
+def get_bald_batch(alphas, betas, batch_size:int=1): 
+    """
+    Return top k samples with the highest BALD scores.
+    
+    Parameters
+    ----------
+    alphas : numpy.ndarray
+        (n_samples, )
+    betas : numpy.ndarray
+        (n_samples, )
+    batch_size : int, optional
+        The default is 1.
+    """
     scores = bald_scores(alphas, betas)
 
     partitioned_indices = np.argpartition(scores, -batch_size)[-batch_size:]
@@ -75,8 +86,40 @@ def get_balif_bald_batch(alphas, betas, batch_size:int=1):
 
     return CandidateBatch(candidate_scores, topk_indices)
 
+def get_balif_bald_batch(alphas, betas, batch_size:int = 1): 
+    """
+    For each estimator, compute the BALD score for each sample. 
+    Sum the scores over all trees. 
+    Select the batch_size samples with the highest scores.
 
-#------------------- ClosedBatchBALD -------------------#
+    Parameters
+    ----------
+    alphas : numpy.ndarray
+        (n_samples, n_estimators)
+    betas: numpy.ndarray
+        (n_samples, n_estimators)
+    batch_size : int, optional
+        The default is 1.
+    
+    Returns 
+    -------
+    CandidateBatch
+        A named tuple containing the scores and indices of the selected samples.
+    """
+    n_samples, n_trees = alphas.shape
+    scores = np.zeros((n_samples, n_trees))
+    for t in range(n_trees): 
+        batch_t = bald_scores(alphas[:, t], betas[:, t])
+        scores[:, t] = batch_t
+    scores = np.sum(scores, axis=1) 
+
+    partitioned_indices = np.argpartition(scores, -batch_size)[-batch_size:]
+    topk_indices = partitioned_indices[np.argsort(scores[partitioned_indices])[::-1]]
+    candidate_scores = scores[topk_indices]
+    return CandidateBatch(candidate_scores, topk_indices)
+
+
+# #------------------- ClosedBatchBALD -------------------#
 
 def compute_leaf_entropy(alpha_l:float, beta_l:float, samples_in_leaf:int): 
     """
@@ -185,20 +228,18 @@ def batchbald_scores(alphas, betas, group_by_leaf):
 
     # compute the joint entropy using leaves
     joint_entropy_per_leaf = compute_joint_entropy(alphas_leaves, betas_leaves, counts)   # shape (n_leaves, )
-    # assert all positive
-    assert np.all(joint_entropy_per_leaf >= 0), "Joint entropy must be non-negative."
 
     # sum over leaves 
-    scores = np.sum(joint_entropy_per_leaf)                     # shape (1, )
-    # asssert all positive
-     
-    scores -= compute_conditional_joint_entropy(alphas, betas) # shape (1, )
-    assert (compute_conditional_entropy(alphas, betas) >= 0).all(), "Conditional entropy must be non-negative."
-    print("\n\n\n")
-    print(np.sum(joint_entropy_per_leaf), compute_conditional_joint_entropy(alphas, betas), scores)
-    assert np.all(scores >= 0), "BatchBALD score must be non-negative."
+    joint_entropy = np.sum(joint_entropy_per_leaf)                          # shape (1, )
+    cond_joint_entropy = compute_conditional_joint_entropy(alphas, betas)   # shape (1, )
+    score = joint_entropy - cond_joint_entropy                              # shape (1, )
     
-    return scores
+    # assert all positive 
+    assert score >= 0, "BatchBALD score must be non-negative."
+    assert joint_entropy >= 0, "Joint entropy must be non-negative."
+    assert cond_joint_entropy >= 0, "Conditional joint entropy must be non-negative."
+
+    return score 
 
 def get_balif_batchbald_batch(alphas, betas, group_by_leaves, k:int = 1): 
     """
@@ -225,9 +266,9 @@ def get_balif_batchbald_batch(alphas, betas, group_by_leaves, k:int = 1):
         Number of samples to select.
     """
     A = []
+    A_scores = []
     n_samples, n_trees = alphas.shape
     for i in range(k): 
-        print("A in iteration ", i, "is ", A)
         scores_over_tree = np.zeros((n_samples,)) # shape (n_samples, )
         candidates = np.setdiff1d(np.arange(n_samples), A, assume_unique=True)      # shape (n_samples - i, )
 
@@ -239,36 +280,41 @@ def get_balif_batchbald_batch(alphas, betas, group_by_leaves, k:int = 1):
             betas_in_A = betas_t[A]
             group_by_leaves_in_A = group_by_leaves_t[A]
 
-            print(alphas_in_A)
-
             for j in candidates: 
                 alphas_batch = np.concatenate([alphas_in_A, [alphas_t[j]]]) # shape (i+1, )
                 betas_batch = np.concatenate([betas_in_A, [betas_t[j]]]) # shape (i+1, )
                 leaves_batch = np.concatenate([group_by_leaves_in_A, [group_by_leaves_t[j]]]) # shape (i+1, )
 
                 mi = batchbald_scores(alphas_batch, betas_batch, leaves_batch) # shape (1,)
-                print('mi', mi)
                 scores_over_tree[j] += mi # we sum the mutual information over trees
             
         best_candidate = np.argmax(scores_over_tree)
+        best_candidate_score = scores_over_tree[best_candidate]
         A.append(best_candidate)
+        A_scores.append(best_candidate_score)
     
-    return A
+    # transform in CandidateBatch
+    A_scores = np.array(A_scores)
+    A = np.array(A)
+    
+    batch = CandidateBatch(A_scores, A)
+    return batch
 
 
-np.random.seed(42)
-n_samples = 10
-n_trees = 3
-k = 3
+if __name__ == "__main__":
+    np.random.seed(42)
+    n_samples = 10
+    n_trees = 3
+    k = 3
 
-alphas = np.random.uniform(1, 3, size=(n_samples, n_trees))
-betas = np.random.uniform(1, 3, size=(n_samples, n_trees))
-group_by_leaves = np.random.randint(0, 4, size=(n_samples, n_trees))
-print("Alphas:", alphas)
+    alphas = np.random.uniform(1, 3, size=(n_samples, n_trees))
+    betas = np.random.uniform(1, 3, size=(n_samples, n_trees))
+    group_by_leaves = np.random.randint(0, 4, size=(n_samples, n_trees))
+    print("Alphas:", alphas)
 
-selected = get_balif_batchbald_batch(alphas, betas, group_by_leaves, k)
-print("Selected indices:", selected)
-            
+    selected = get_balif_batchbald_batch(alphas, betas, group_by_leaves, k)
+    print("Selected indices:", selected)
+                
 
         
 
