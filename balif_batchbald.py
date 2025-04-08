@@ -1,6 +1,6 @@
 """
 This script implements BALD and BatchBALD for active learning 
-using the exact formula for conditional and unconditional entropies
+using the closed formula for conditional and unconditional entropies
 in the case of BALIF.
 """
 import numpy as np
@@ -66,7 +66,7 @@ def bald_scores(alphas, betas):
     return scores
     
 
-def get_exactbald_batch(alphas, betas, batch_size:int=1): 
+def get_balif_bald_batch(alphas, betas, batch_size:int=1): 
     scores = bald_scores(alphas, betas)
 
     partitioned_indices = np.argpartition(scores, -batch_size)[-batch_size:]
@@ -76,7 +76,7 @@ def get_exactbald_batch(alphas, betas, batch_size:int=1):
     return CandidateBatch(candidate_scores, topk_indices)
 
 
-#------------------- ExactBatchBALD -------------------#
+#------------------- ClosedBatchBALD -------------------#
 
 def compute_leaf_entropy(alpha_l:float, beta_l:float, samples_in_leaf:int): 
     """
@@ -96,14 +96,20 @@ def compute_leaf_entropy(alpha_l:float, beta_l:float, samples_in_leaf:int):
     # vectorial way 
     # code the Beta function directly? 
     """
-    p = BetaFunction(alpha_l, beta_l + samples_in_leaf) / BetaFunction(alpha_l, beta_l)
+    betafnc_al_bl = BetaFunction(alpha_l, beta_l)
+    p = BetaFunction(alpha_l, beta_l + samples_in_leaf) / betafnc_al_bl
     H_l = -p * np.log(p)
     
-    for s in range(1, samples_in_leaf+1): 
+    # compute recursively from 1,..., ml-1 
+    for s in range(1, samples_in_leaf): 
         fs = (alpha_l+s)*(beta_l -1+samples_in_leaf-s)/((s+1)*(samples_in_leaf-s))
         p = p * fs 
         H_l += -p * np.log(p)
     
+    # the last term must be computed using formula as it provides denominator 0
+    s = samples_in_leaf
+    p_ml = BetaFunction(alpha_l + s, beta_l) / betafnc_al_bl
+    H_l += -p_ml * np.log(p_ml)
     return H_l
 
 def compute_joint_entropy(alphas_leaves, betas_leaves, samples_in_leaf): 
@@ -139,6 +145,11 @@ def compute_conditional_joint_entropy(alphas, betas):
         (k, )
     betas : numpy.ndarray
         (k, )   
+    
+    Returns
+    -------
+    float
+        The joint conditional entropy H(y1, ..., yk|w).
     """
     single_conditional_entropies = compute_conditional_entropy(alphas, betas)       # shape (k, )
     joint_conditional_entropy = np.sum(single_conditional_entropies, axis=0)        # float      
@@ -158,46 +169,51 @@ def batchbald_scores(alphas, betas, group_by_leaf):
     group_by_leaf : numpy.ndarray. The group_by_leaf[i] is the leaf index of the i-th point.
         (k, )
 
-    # Returns
-    # -------
-    # numpy.ndarray
-    #     (p, )
+    Returns
+    -------
+    float
+        The batchbald score (mutual information) for the set. 
+
     """
     # group points by leaf 
     unique_leaves, counts = np.unique(group_by_leaf, return_counts=True)
 
     # for each leaf, assuming that each point in the leaf has the same alpha and beta, 
-    # thake the first alpha and beta 
+    # take the first alpha and beta 
     alphas_leaves = np.array([alphas[group_by_leaf == leaf][0] for leaf in unique_leaves])
     betas_leaves = np.array([betas[group_by_leaf == leaf][0] for leaf in unique_leaves])
 
     # compute the joint entropy using leaves
-    joint_entropy_per_leaf = compute_joint_entropy(alphas_leaves, betas_leaves, counts) # shape (n_leaves, )
+    joint_entropy_per_leaf = compute_joint_entropy(alphas_leaves, betas_leaves, counts)   # shape (n_leaves, )
+    # assert all positive
+    assert np.all(joint_entropy_per_leaf >= 0), "Joint entropy must be non-negative."
 
     # sum over leaves 
-    joint_entropy = np.sum(joint_entropy_per_leaf) 
-
-    # expand the joint entropies to each point 
-    indices = np.searchsorted(unique_leaves, group_by_leaf)
-    scores = joint_entropy_per_leaf[indices]
-
-    scores = - compute_conditional_joint_entropy(alphas, betas) # shape ()
+    scores = np.sum(joint_entropy_per_leaf)                     # shape (1, )
+    # asssert all positive
+     
+    scores -= compute_conditional_joint_entropy(alphas, betas) # shape (1, )
+    assert (compute_conditional_entropy(alphas, betas) >= 0).all(), "Conditional entropy must be non-negative."
+    print("\n\n\n")
+    print(np.sum(joint_entropy_per_leaf), compute_conditional_joint_entropy(alphas, betas), scores)
+    assert np.all(scores >= 0), "BatchBALD score must be non-negative."
+    
     return scores
 
-def get_batchbald_batch(alphas, betas, group_by_leaves, k:int = 1): 
+def get_balif_batchbald_batch(alphas, betas, group_by_leaves, k:int = 1): 
     """
     Greedily select k points that maximize the batchbald score.
 
-    Initialize A = {} for storing selected points. 
+    Initialize A = {} for storing selected points.
     For each iteration i from 1 to k: 
         1. For each tree:
             For each point j not in A:  
                 a. Compute I_t(y1, ..., yk-1, yj; w)
         2. Sum the scores over all tree to get I(y1, ..., yk-1, yj; w)
         3. Select the point with the highest score and add it to A.
-
+    
     Parameters
-    ----------  
+    ----------
     alphas : numpy.ndarray
         (n_samples, n_trees)
     betas : numpy.ndarray
@@ -207,61 +223,51 @@ def get_batchbald_batch(alphas, betas, group_by_leaves, k:int = 1):
         (n_samples, n_trees)
     k : int
         Number of samples to select.
-    """    
-    A = []  
-    # A_scores = np.zeros(k)
-
-    n_trees = alphas.shape[1]
-
-    # iterate over k points
+    """
+    A = []
+    n_samples, n_trees = alphas.shape
     for i in range(k): 
+        print("A in iteration ", i, "is ", A)
+        scores_over_tree = np.zeros((n_samples,)) # shape (n_samples, )
+        candidates = np.setdiff1d(np.arange(n_samples), A, assume_unique=True)      # shape (n_samples - i, )
 
-        scores_over_tree = np.zeros((i+1, alphas.shape[0], n_trees))
-        
-        # for each tree, for each point compute the scores given the previous points in A
         for tree in range(n_trees): 
-
-            # for each point not in A, retrieve alphas and betas of previous points and candidate point
-            # and compute the scores 
-            # gather believes should return a (n_samples, )
             alphas_t, betas_t = alphas[:, tree], betas[:, tree]
             group_by_leaves_t = group_by_leaves[:, tree]
 
-            # pass the model and use gather remove loop over trees--------------------------------------------------------------------
             alphas_in_A = alphas_t[A]
             betas_in_A = betas_t[A]
             group_by_leaves_in_A = group_by_leaves_t[A]
 
-            # scores_t = np.zeros((i+1, alphas.shape[0]-len(A)))
+            print(alphas_in_A)
 
-            # move the point to the beginning and take the ordering maps
-            # so we avoid to chekc if j in A or not 
-            for j in range(alphas.shape[0]): 
-                if j not in A: 
-                    # concatenate alphas_in_A and alphas_t[j]
-                    alphas_candidate_batch = np.concatenate((alphas_in_A, alphas_t[j].reshape(1, -1)), axis=0) # shape (i+1, )
-                    betas_candidate_batch = np.concatenate((betas_in_A, betas_t[j].reshape(1, -1)), axis=0) # shape (i+1, )
-                    group_by_leaves_candidate_batch = np.concatenate((group_by_leaves_in_A, group_by_leaves_t[j].reshape(1, -1)), axis=0)
-                    assert alphas_candidate_batch.shape[0] == i+1
+            for j in candidates: 
+                alphas_batch = np.concatenate([alphas_in_A, [alphas_t[j]]]) # shape (i+1, )
+                betas_batch = np.concatenate([betas_in_A, [betas_t[j]]]) # shape (i+1, )
+                leaves_batch = np.concatenate([group_by_leaves_in_A, [group_by_leaves_t[j]]]) # shape (i+1, )
 
-                    mutual_info = batchbald_scores(alphas_candidate_batch, betas_candidate_batch, group_by_leaves_candidate_batch)      # shape (i+1, ) 
-                    scores_over_tree[:, j, tree] = mutual_info
-                else: 
-                    # if the candidate is already selected, we don't want it to be selected again
-                    # so we set the score to -inf
-                    scores_over_tree[:, j, tree] = -np.inf 
-        
-
-        # sum over trees
-        scores_over_tree = np.sum(scores_over_tree, axis=2)         # shape (i+1, n_samples)
-
-        # take the argmax (since points in A have scores -inf, they will be ignored)
-        best_candidate = np.argmax(scores_over_tree[i, :])
-        best_score = scores_over_tree[i, best_candidate]
-
-
-
+                mi = batchbald_scores(alphas_batch, betas_batch, leaves_batch) # shape (1,)
+                print('mi', mi)
+                scores_over_tree[j] += mi # we sum the mutual information over trees
             
+        best_candidate = np.argmax(scores_over_tree)
+        A.append(best_candidate)
+    
+    return A
+
+
+np.random.seed(42)
+n_samples = 10
+n_trees = 3
+k = 3
+
+alphas = np.random.uniform(1, 3, size=(n_samples, n_trees))
+betas = np.random.uniform(1, 3, size=(n_samples, n_trees))
+group_by_leaves = np.random.randint(0, 4, size=(n_samples, n_trees))
+print("Alphas:", alphas)
+
+selected = get_balif_batchbald_batch(alphas, betas, group_by_leaves, k)
+print("Selected indices:", selected)
             
 
         
