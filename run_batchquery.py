@@ -79,7 +79,10 @@ def run_sim(
     assert not queriable.any(), "Some points have not been queried"
     save_dir = f"results/{data_copies}x{dataset}/{"independent" if independent_queries else "worstcase"}/{interest_method}/batch_size_{batch_size}"
     if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+        try:
+            os.makedirs(save_dir)
+        except FileExistsError:
+            pass
     save_path = f"{save_dir}/seed_{seed}"
     np.savez_compressed(save_path, avp_train=np.array(avp_train), avp_test=np.array(avp_test))
 
@@ -100,5 +103,5 @@ if __name__ == "__main__":
         for interest in ["bald", "margin", "anom"]
         for independent in [True, False]
         for batch_size in [1, 5, 10]
-        for seed in [0, 1, 2, 3, 4]
+        for seed in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     )

@@ -135,11 +135,12 @@ class BayesianDetector(BaseDetector):
             queries_idxs.append(scores.argmax())
             mask[queries_idxs[-1]] = False
 
-            # worst case approximation as region-wise
+            # worst case beliefs for the queried point
             if self.interest_method in ["margin", "bald"]:
+                mu = self.aggregate_beliefs(beliefs).mu()
                 worstcase_beliefs = BetaDistr(
-                    a=beliefs.a + (beliefs.a > beliefs.b).astype(int),
-                    b=beliefs.b + (beliefs.a < beliefs.b).astype(int),
+                    a=beliefs.a + (mu > 0.5).astype(float),
+                    b=beliefs.b + (mu <= 0.5).astype(float),
                 )
             elif self.interest_method == "anom":
                 worstcase_beliefs = BetaDistr(a=beliefs.a, b=beliefs.b + 1.0)
