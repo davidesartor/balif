@@ -179,7 +179,7 @@ class BayesianDetector(BaseDetector):
     ) -> Float[np.ndarray, "samples"]:
         beliefs = self.aggregate_beliefs(beliefs)
         if self.interest_method == "margin":
-            log_margin = beliefs.log_pdf(beliefs.mu()) - beliefs.log_pdf(0.5)
+            log_margin = beliefs.log_pdf(beliefs.mode()) - beliefs.log_pdf(0.5)
             return np.exp(-log_margin)
         elif self.interest_method == "anom":
             return beliefs.mu()

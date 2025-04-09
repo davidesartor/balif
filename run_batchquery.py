@@ -77,7 +77,7 @@ def run_sim(
 
     # save results
     assert not queriable.any(), "Some points have not been queried"
-    save_dir = f"results/{interest_method}/{data_copies}x{dataset}/batch_size_{batch_size}"
+    save_dir = f"results/{data_copies}x{dataset}/{"independent" if independent_queries else "worstcase"}/{interest_method}/batch_size_{batch_size}"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     save_path = f"{save_dir}/seed_{seed}"
@@ -86,7 +86,7 @@ def run_sim(
 
 if __name__ == "__main__":
     # run small datasets
-    Parallel(n_jobs=16)(
+    Parallel(n_jobs=64)(
         delayed(run_sim)(
             dataset=dataset,
             data_copies=copies,
