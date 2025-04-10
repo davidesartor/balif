@@ -109,212 +109,160 @@ def get_balif_bald_batch(alphas, betas, batch_size:int = 1):
     n_samples, n_trees = alphas.shape
     scores = np.zeros((n_samples, n_trees))
     for t in range(n_trees): 
-        batch_t = bald_scores(alphas[:, t], betas[:, t])
+        batch_t = bald_scores(alphas[:, t], betas[:, t]) # shape (n_samples, )
         scores[:, t] = batch_t
-    scores = np.sum(scores, axis=1) 
+    scores = np.sum(scores, axis=1)                      # shape (n_samples, )
 
-    partitioned_indices = np.argpartition(scores, -batch_size)[-batch_size:]
-    topk_indices = partitioned_indices[np.argsort(scores[partitioned_indices])[::-1]]
+
+    
+    topk_indices = np.argsort(scores)[-batch_size:][::-1] # shape (batch_size, )
     candidate_scores = scores[topk_indices]
+
+    # these return different indices
+    #    partitioned_indices = np.argpartition(scores, -batch_size)[-batch_size:]
+    # topk_indices = partitioned_indices[np.argsort(scores[partitioned_indices])[::-1]]
     return CandidateBatch(candidate_scores, topk_indices)
 
-
 # #------------------- ClosedBatchBALD -------------------#
-
-def compute_leaf_entropy(alpha_l:float, beta_l:float, samples_in_leaf:int): 
+def entropy_leaf(alphal:float, betal:float, samples:int):
     """
-    Compute H_l(y_l_1, ..., y_l_ml) = - - sum_s=0*^ml p(s)*log2(p(s))
+    Compute entropy of a leaf as H_l(y1,...,ylml) = - sum_{s=0}^{ml} comb(samples_in_leaf,s) p(s)log(p(s))
+    where:
+        - ml: samples in the leaf 
+        - p(s) = B(alpha_l + s, beta_l + samples_in_leaf -s) / B(alpha_l, beta_l) 
+               = exp(betaln(alpha_l + s, beta_l + samples_in_leaf -s) - betaln(alpha_l, beta_l))
+    """
+    s = np.arange(samples + 1)                                              # shape (ml+1, )
+    binom_coeffs = comb(samples, s)                                         # shape (ml+1, )
+    log_p_s = betaln(alphal+s, betal+samples-s) - betaln(alphal, betal)     # shape (ml+1, )
+    p_s = np.exp(log_p_s)                                                   # shape (ml+1, )
+    entropy = - np.sum(binom_coeffs*p_s*log_p_s)                            # shape (1,)
+    return entropy
 
-    where p(s) = p(s-1) * (alpha_l + s-1)*(beta_l - 1 + ml -s) / ((s+1) * (ml-s))
-    and p(0) = B(alpha_l, beta_l + ml)/B(alpha_l, beta_l)
+def joint_mutual_information(alphas, betas, leaves):
+    """
+    Compute the joint mutual information I(y1,...,yk; w) = H(y1,...,yk) - E_w[H(y1,...,yk|w)]
+    where: 
+        - H(y1,...,yk) = sum_l H_l(y1,...,ylml) where l are the leaves of the samples y1,...,yk
+        - E_w[H(y1,...,yk|w)] = sum_k E_w[H(yk|wk)]
 
     Parameters
     ----------
-    alpha_l : float
-        alpha parameter of the anomaly rate of leaf l
-    beta_l : float
-        beta parameter of the anomaly rate of leaf l
-    
-    # change in the log form
-    # vectorial way 
-    # code the Beta function directly? 
-    """
-    betafnc_al_bl = BetaFunction(alpha_l, beta_l)
-    p = BetaFunction(alpha_l, beta_l + samples_in_leaf) / betafnc_al_bl
-    H_l = -p * np.log(p)
-    
-    # compute recursively from 1,..., ml-1 
-    for s in range(1, samples_in_leaf): 
-        fs = (alpha_l+s)*(beta_l -1+samples_in_leaf-s)/((s+1)*(samples_in_leaf-s))
-        p = p * fs 
-        H_l += -p * np.log(p)
-    
-    # the last term must be computed using formula as it provides denominator 0
-    s = samples_in_leaf
-    p_ml = BetaFunction(alpha_l + s, beta_l) / betafnc_al_bl
-    H_l += -p_ml * np.log(p_ml)
-    return H_l
-
-def compute_joint_entropy(alphas_leaves, betas_leaves, samples_in_leaf): 
-    """
-    Compute H(y1, ..., yp) = sum_l H_l(y_l_1, ..., y_l_ml) where m_l is the number of samples in leaf l.
-
-    Parameters
-    ----------
-    alphas_leaves : numpy.ndarray -> alpha di ogni foglia in cui finiscono i punti
-        (n_leaves, )
-    betas_leaves : numpy.ndarray
-        (n_leaves, )
-    samples_in_leaf : numpy.ndarray
-        (n_leaves, )
-    """
-    n_leaves = alphas_leaves.shape[0]
-    joint_entropy = 0.0
-    for l in range(n_leaves):
-        alpha_l = alphas_leaves[l]
-        beta_l = betas_leaves[l]
-        samples_in_leaf_l = samples_in_leaf[l]
-        joint_entropy += compute_leaf_entropy(alpha_l, beta_l, samples_in_leaf_l)
-    return joint_entropy
-
-
-def compute_conditional_joint_entropy(alphas, betas): 
-    """
-    E_w[H(y1, ..., yk|w)] = sum_i E_w[H(yi|wi)] assuming y1|w1, ..., yp|wk independent
-
-    Parameters
-    ----------
-    alphas : numpy.ndarray
-        (k, )
-    betas : numpy.ndarray
-        (k, )   
-    
-    Returns
-    -------
-    float
-        The joint conditional entropy H(y1, ..., yk|w).
-    """
-    single_conditional_entropies = compute_conditional_entropy(alphas, betas)       # shape (k, )
-    joint_conditional_entropy = np.sum(single_conditional_entropies, axis=0)        # float      
-    return joint_conditional_entropy
-
-
-def batchbald_scores(alphas, betas, group_by_leaf):
-    """
-    Given parameters w and set of p points 1,...,k, compute I(y1, ..., yk;w) 
-
-    Parameters
-    ----------
-    alphas : numpy.ndarray
-        (k, )
-    betas : numpy.ndarray
-        (k, )
-    group_by_leaf : numpy.ndarray. The group_by_leaf[i] is the leaf index of the i-th point.
-        (k, )
+    alphas : np.ndarray
+        Alphahs parameters of w. Shape (k, n_estimators)
+    betas : np.ndarray
+        Betas parameters of w. Shape (k, n_estimators)
+    leaves : np.ndarray
+        Leaves idxs for each sample. Shape (k, n_estimators)
 
     Returns
     -------
     float
-        The batchbald score (mutual information) for the set. 
-
+        Mutual information I(y1,...,yk; w) for each estimator. Shape (n_estimators,)
     """
-    # group points by leaf 
-    unique_leaves, counts = np.unique(group_by_leaf, return_counts=True)
+    n_estimators = alphas.shape[1]
+    # joint conditional entropy 
+    samplesizes = alphas + betas         # (k, n_estimators)
+    means = alphas / samplesizes         # (k, n_estimators)
+    cond_entropies = - means*digamma(alphas+1) - (1-means)*digamma(betas+1) + digamma(samplesizes+1) 
+    joint_cond_entropies = np.sum(cond_entropies, axis=0)
+    #NOTE: to sum across all axis if you want to sum inside here over estimators 
 
-    # for each leaf, assuming that each point in the leaf has the same alpha and beta, 
-    # take the first alpha and beta 
-    alphas_leaves = np.array([alphas[group_by_leaf == leaf][0] for leaf in unique_leaves])
-    betas_leaves = np.array([betas[group_by_leaf == leaf][0] for leaf in unique_leaves])
+    # joint entropy (non so come non iterare sugli alberi)
+    joint_entropies = np.zeros(n_estimators)
+    for t in range(n_estimators): 
+        leavest = leaves[:, t]
+        unique_leaves, counts = np.unique(leavest, return_counts=True)
 
-    # compute the joint entropy using leaves
-    joint_entropy_per_leaf = compute_joint_entropy(alphas_leaves, betas_leaves, counts)   # shape (n_leaves, )
+        # extract one representative alpha and beta for each leaf 
+        unique_alphas = np.empty_like(unique_leaves, dtype=float)
+        unique_betas = np.empty_like(unique_leaves, dtype=float)
+        for i, leaf in enumerate(unique_leaves): 
+            idx = np.where(leavest == leaf)[0][0]   # get first index of the leaf
+            unique_alphas[i] = alphas[idx, t]      # shape (ml,)
+            unique_betas[i] = betas[idx, t]        # shape (ml,)
+        
+        # compute entropy for the tree as sum over the leaves
+        jentropy_tree = 0.0
+        for alpha_l, beta_l, samples_in_leaf in zip(unique_alphas, unique_betas, counts): 
+            jentropy_tree += entropy_leaf(alpha_l, beta_l, samples_in_leaf)
+        
+        joint_entropies[t] = jentropy_tree
 
-    # sum over leaves 
-    joint_entropy = np.sum(joint_entropy_per_leaf)                          # shape (1, )
-    cond_joint_entropy = compute_conditional_joint_entropy(alphas, betas)   # shape (1, )
-    score = joint_entropy - cond_joint_entropy                              # shape (1, )
+    #NOTE: if you want to sum across all trees you can do it here
+
+    assert joint_entropies.shape == (n_estimators,)
+    assert joint_cond_entropies.shape == (n_estimators,)
+    joint_mi = joint_entropies - joint_cond_entropies
+    assert np.all(joint_mi >= 0), f"Joint MI is negative: {joint_mi}"
+    return joint_mi
+
+def batchbald_batch(alphas, betas, leaves, k:int=1): 
+    """
+    Greedily selects the k most informative samples for batchBALD.
+    """
+    n_samples, n_estimators = alphas.shape
+    A = np.empty(k, dtype=int)  
+    A_scores = np.empty(k, dtype=float)     
+
+    selected = np.zeros(n_samples, dtype=bool) # keep track of selected samples 
     
-    # assert all positive 
-    assert score >= 0, "BatchBALD score must be non-negative."
-    assert joint_entropy >= 0, "Joint entropy must be non-negative."
-    assert cond_joint_entropy >= 0, "Conditional joint entropy must be non-negative."
+    for i in range(k):
+        scores = -1 * np.ones((n_samples, n_estimators)) 
+        alphas_sel = alphas[selected]                   # (i, n_estimators)
+        betas_sel = betas[selected]                     # (i, n_estimators)
+        leaves_sel = leaves[selected]                   # (i, n_estimators)
 
-    return score 
+        candidates = np.setdiff1d(np.arange(n_samples), A[:i], assume_unique=True)
+        for j in candidates: 
+            alphas_batch = np.concatenate((alphas_sel, alphas[j:j+1]))  # (i+1, n_estimators)
+            betas_batch = np.concatenate((betas_sel, betas[j:j+1]))
+            leaves_batch = np.concatenate((leaves_sel, leaves[j:j+1]))
 
-def get_balif_batchbald_batch(alphas, betas, group_by_leaves, k:int = 1): 
-    """
-    Greedily select k points that maximize the batchbald score.
+            mi = joint_mutual_information(alphas_batch, betas_batch, leaves_batch)
+            scores[j] = mi
 
-    Initialize A = {} for storing selected points.
-    For each iteration i from 1 to k: 
-        1. For each tree:
-            For each point j not in A:  
-                a. Compute I_t(y1, ..., yk-1, yj; w)
-        2. Sum the scores over all tree to get I(y1, ..., yk-1, yj; w)
-        3. Select the point with the highest score and add it to A.
-    
-    Parameters
-    ----------
-    alphas : numpy.ndarray
-        (n_samples, n_trees)
-    betas : numpy.ndarray
-        (n_samples, n_trees)
-    group_by_leaves : numpy.ndarray
-        The group_by_leaves[i] is the leaf index of the i-th point.
-        (n_samples, n_trees)
-    k : int
-        Number of samples to select.
-    """
-    A = []
-    A_scores = []
-    n_samples, n_trees = alphas.shape
-    for i in range(k): 
-        scores_over_tree = np.zeros((n_samples,)) # shape (n_samples, )
-        candidates = np.setdiff1d(np.arange(n_samples), A, assume_unique=True)      # shape (n_samples - i, )
-
-        for tree in range(n_trees): 
-            alphas_t, betas_t = alphas[:, tree], betas[:, tree]
-            group_by_leaves_t = group_by_leaves[:, tree]
-
-            alphas_in_A = alphas_t[A]
-            betas_in_A = betas_t[A]
-            group_by_leaves_in_A = group_by_leaves_t[A]
-
-            for j in candidates: 
-                alphas_batch = np.concatenate([alphas_in_A, [alphas_t[j]]]) # shape (i+1, )
-                betas_batch = np.concatenate([betas_in_A, [betas_t[j]]]) # shape (i+1, )
-                leaves_batch = np.concatenate([group_by_leaves_in_A, [group_by_leaves_t[j]]]) # shape (i+1, )
-
-                mi = batchbald_scores(alphas_batch, betas_batch, leaves_batch) # shape (1,)
-                scores_over_tree[j] += mi # we sum the mutual information over trees
             
-        best_candidate = np.argmax(scores_over_tree)
-        best_candidate_score = scores_over_tree[best_candidate]
-        A.append(best_candidate)
-        A_scores.append(best_candidate_score)
+        # sum over trees 
+        scores = np.sum(scores, axis=1)
+        
+        scores[selected] = -np.inf
+        best_candidate = np.argmax(scores)
+        best_score = scores[best_candidate]
+        A[i] = best_candidate
+        A_scores[i] = best_score
+
+        # update selected samples
+        selected[best_candidate] = True
     
-    # transform in CandidateBatch
-    A_scores = np.array(A_scores)
-    A = np.array(A)
-    
-    batch = CandidateBatch(A_scores, A)
-    return batch
+    return A
 
 
-if __name__ == "__main__":
-    np.random.seed(42)
-    n_samples = 10
-    n_trees = 3
-    k = 3
+if __name__ == '__main__':
+    n_samples, n_estimators = 100, 3
 
-    alphas = np.random.uniform(1, 3, size=(n_samples, n_trees))
-    betas = np.random.uniform(1, 3, size=(n_samples, n_trees))
-    group_by_leaves = np.random.randint(0, 4, size=(n_samples, n_trees))
-    print("Alphas:", alphas)
+    # Generate leaf indices
+    leaf_idxs = np.random.randint(0, 10, size=(n_samples, n_estimators))
 
-    selected = get_balif_batchbald_batch(alphas, betas, group_by_leaves, k)
-    print("Selected indices:", selected)
-                
+    # Generate shared (alpha, beta) for each unique leaf
+    unique_leaf_ids = np.unique(leaf_idxs)
+    leaf_to_params = {
+        leaf: (np.random.randint(1, 10), np.random.randint(1, 10))
+        for leaf in unique_leaf_ids
+    }
+
+    # Build alpha and beta arrays with shared values for same leaf
+    alphas = np.zeros_like(leaf_idxs)
+    betas = np.zeros_like(leaf_idxs)
+    for i in range(n_samples):
+        for j in range(n_estimators):
+            leaf = leaf_idxs[i, j]
+            alpha, beta = leaf_to_params[leaf]
+            alphas[i, j] = alpha
+            betas[i, j] = beta
+
+    batch = batchbald_batch(alphas, betas, leaf_idxs, k=10)
+    print("selected", batch)
 
         
 
