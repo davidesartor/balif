@@ -5,18 +5,22 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
 
-from iforest import BAD_IForest
 import odds_datasets
+from iforest import BAD_IForest
+import batch_bald
 
 
 def run_sim(
     dataset,
-    data_copies,
     batch_size,
-    interest_method,
-    independent_queries,
+    strategy,
     seed,
 ):
+    if strategy.startswith("independent") or strategy.startswith("worstcase"):
+        _, interest_method = strategy.split("_")
+    else:
+        interest_method = "bald"
+
     # load dataset
     X, y = odds_datasets.load(dataset)
     contamination = y.mean()
@@ -24,9 +28,9 @@ def run_sim(
         X, y, test_size=0.5, random_state=seed, stratify=y
     )
 
-    # duplicate trainset
-    X_train = np.concatenate([X_train] * data_copies, axis=0)
-    y_train = np.concatenate([y_train] * data_copies, axis=0)
+    # duplicate trainset (copies = batch_size)
+    X_train = np.concatenate([X_train] * batch_size, axis=0)
+    y_train = np.concatenate([y_train] * batch_size, axis=0)
 
     # fit the unsupervised model
     model = BAD_IForest(
@@ -44,14 +48,37 @@ def run_sim(
     # run the simulation
     iterations = int(np.floor(len(X_train) / batch_size))
     queriable = np.ones(len(X_train), dtype=bool)
-    for _ in tqdm(range(iterations), f"{dataset}: strat={interest_method} bs={batch_size}"):
+    for _ in tqdm(range(iterations), f"{dataset}: {strategy} bs={batch_size}"):
         # get the queries indices
-        idxs = model.get_queries(
-            X=X_train,
-            batch_size=batch_size,
-            independent=independent_queries,
-            mask=queriable,
-        )
+        if strategy.startswith("independent"):
+            idxs = model.get_queries(
+                X=X_train,
+                batch_size=batch_size,
+                independent=True,
+                mask=queriable,
+            )
+        elif strategy.startswith("worstcase"):
+            idxs = model.get_queries(
+                X=X_train,
+                batch_size=batch_size,
+                independent=False,
+                mask=queriable,
+            )
+        elif strategy == "batchbald":
+            idxs = batch_bald.get_queries(
+                model=model,
+                X=X_train,
+                batch_size=batch_size,
+                mask=queriable,
+            )
+        elif strategy == "random":
+            idxs = np.random.choice(
+                np.arange(len(X_train))[queriable],
+                batch_size,
+                replace=False,
+            )
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
 
         # update the model with the queried samples
         model.update(X_train[idxs, :], y_train[idxs])
@@ -77,9 +104,9 @@ def run_sim(
 
     # save results
     assert not queriable.any(), "Some points have not been queried"
-    save_dir = f"results/{data_copies}x{dataset}/{"independent" if independent_queries else "worstcase"}/{interest_method}/batch_size_{batch_size}"
+    save_dir = f"results/{dataset}/{strategy}/batch_size_{batch_size}"
     if not os.path.exists(save_dir):
-        try:
+        try:  # catch (rare) race conditions in parallel runs
             os.makedirs(save_dir)
         except FileExistsError:
             pass
@@ -88,19 +115,21 @@ def run_sim(
 
 
 if __name__ == "__main__":
-    # run small datasets
-    Parallel(n_jobs=16)(
+    Parallel(n_jobs=10)(
         delayed(run_sim)(
             dataset=dataset,
-            data_copies=batch_size,
             batch_size=batch_size,
-            interest_method=interest,
-            independent_queries=independent,
+            strategy=strategy,
             seed=seed,
         )
-        for dataset in odds_datasets.small_datasets_names + odds_datasets.medium_datasets_names
-        for interest in ["bald", "margin", "anom"]
-        for independent in [True, False]
+        for strategy in (
+            ["random"]
+            + ["independent_bald", "worstcase_bald"]
+            + ["independent_margin", "worstcase_margin"]
+            + ["independent_anom", "worstcase_anom"]
+            + ["batchbald"]
+        )
+        for dataset in odds_datasets.datasets_names
         for batch_size in [1, 5, 10]
         for seed in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     )
