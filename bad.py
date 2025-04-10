@@ -41,7 +41,6 @@ class BayesianDetector(BaseDetector):
     def __init__(
         self,
         *args,
-        reprocess_decision_scores: bool = True,
         prior_sample_size: float = 0.1,
         aggregation_method: Literal["sum", "moment"] = "sum",
         interest_method: Literal["margin", "anom", "bald"] = "margin",
@@ -51,7 +50,6 @@ class BayesianDetector(BaseDetector):
         self.prior_sample_size = prior_sample_size
         self.aggregation_method: Literal["sum", "moment"] = aggregation_method
         self.interest_method: Literal["bald", "margin", "anom"] = interest_method
-        self.reprocess_decision_scores = reprocess_decision_scores
 
         self.beliefs: Shaped[BetaDistr, "estimators regions"]  # call .fit to initialize
 
@@ -75,9 +73,7 @@ class BayesianDetector(BaseDetector):
             b=np.maximum(prior_a / a_over_b, prior_b),
         )
 
-        if self.reprocess_decision_scores:
-            self.decision_scores_ = self.decision_function(X)
-            self._process_decision_scores()
+        self.recompute_threshold(X)
         return self
 
     def decision_function(
@@ -106,6 +102,10 @@ class BayesianDetector(BaseDetector):
             np.put_along_axis(self.beliefs.a, regions_sample_i, a + da[i], axis=-1)
             np.put_along_axis(self.beliefs.b, regions_sample_i, b + db[i], axis=-1)
 
+    def recompute_threshold(self, X: Float[np.ndarray, "samples features"]):
+        self.decision_scores_ = self.decision_function(X)
+        self._process_decision_scores()
+
     def get_queries(
         self,
         X: Float[np.ndarray, "samples features"],
@@ -129,8 +129,7 @@ class BayesianDetector(BaseDetector):
             return queries_idxs
 
         queries_idxs = []
-        regions_onehot = np.eye(beliefs.a.shape[-1])[regions].swapaxes(0, 1)
-        queries_in_regions = np.zeros(beliefs.a.shape)
+        queries_in_regions = np.zeros(beliefs.a.shape, dtype=int)  # (estimators, samples)
         for i in range(batch_size):
             # get the worst case candidates
             most_anom = BetaDistr(a=beliefs.a + queries_in_regions, b=beliefs.b)
@@ -139,10 +138,10 @@ class BayesianDetector(BaseDetector):
             # query most interesting point in the worst case
             scores = np.minimum(self.interest(most_anom), self.interest(lest_anom))
             queries_idxs.append(np.where(mask, scores, -np.inf).argmax())
-            
-            # update the mask and regions onehot 
+
+            # update the mask and regions onehot
             mask[queries_idxs[-1]] = False
-            queries_in_regions += regions_onehot[queries_idxs[-1]]
+            queries_in_regions += regions == regions[..., queries_idxs[-1]][..., None]
         return np.array(queries_idxs)
 
     def gather_beliefs(
