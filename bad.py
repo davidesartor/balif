@@ -129,30 +129,19 @@ class BayesianDetector(BaseDetector):
             return queries_idxs
 
         queries_idxs = []
+        queries_regions = np.zeros((batch_size, *beliefs.a.shape), dtype=bool)
         for i in range(batch_size):
-            # query most interesting point
-            scores = np.where(mask, self.interest(beliefs), -np.inf)
-            queries_idxs.append(scores.argmax())
+            # get the worst case candidates
+            most_anom = BetaDistr(a=beliefs.a + queries_regions.sum(0), b=beliefs.b)
+            lest_anom = BetaDistr(a=beliefs.a, b=beliefs.b + queries_regions.sum(0))
+
+            # query most interesting point in the worst case
+            scores = np.minimum(self.interest(most_anom), self.interest(lest_anom))
+            queries_idxs.append(np.where(mask, scores, -np.inf).argmax())
+            
+            # update the mask and regions onehot 
             mask[queries_idxs[-1]] = False
-
-            # worst case beliefs for the queried point
-            if self.interest_method in ["margin", "bald"]:
-                mu = self.aggregate_beliefs(beliefs).mu()
-                worstcase_beliefs = BetaDistr(
-                    a=beliefs.a + (mu > 0.5).astype(float),
-                    b=beliefs.b + (mu <= 0.5).astype(float),
-                )
-            elif self.interest_method == "anom":
-                worstcase_beliefs = BetaDistr(a=beliefs.a, b=beliefs.b + 1.0)
-            else:
-                raise ValueError(f"Unknown interest method: {self.interest_method}")
-
-            # update the beliefs of the affected regions
-            affected_regions = regions == regions[:, queries_idxs[-1]][..., None]
-            beliefs = BetaDistr(
-                a=np.where(affected_regions, worstcase_beliefs.a, beliefs.a),
-                b=np.where(affected_regions, worstcase_beliefs.b, beliefs.b),
-            )
+            queries_regions[i] = regions[:, queries_idxs[-1]]
         return np.array(queries_idxs)
 
     def gather_beliefs(

@@ -89,17 +89,16 @@ def run_sim(
 
 if __name__ == "__main__":
     # run small datasets
-    Parallel(n_jobs=64)(
+    Parallel(n_jobs=16)(
         delayed(run_sim)(
             dataset=dataset,
-            data_copies=copies,
+            data_copies=batch_size,
             batch_size=batch_size,
             interest_method=interest,
             independent_queries=independent,
             seed=seed,
         )
-        for dataset in odds_datasets.datasets_names
-        for copies in [1, 3]
+        for dataset in odds_datasets.small_datasets_names + odds_datasets.medium_datasets_names
         for interest in ["bald", "margin", "anom"]
         for independent in [True, False]
         for batch_size in [1, 5, 10]
