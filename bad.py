@@ -129,11 +129,12 @@ class BayesianDetector(BaseDetector):
             return queries_idxs
 
         queries_idxs = []
-        queries_regions = np.zeros((batch_size, *beliefs.a.shape), dtype=bool)
+        regions_onehot = np.eye(beliefs.a.shape[-1])[regions].swapaxes(0, 1)
+        queries_in_regions = np.zeros(beliefs.a.shape)
         for i in range(batch_size):
             # get the worst case candidates
-            most_anom = BetaDistr(a=beliefs.a + queries_regions.sum(0), b=beliefs.b)
-            lest_anom = BetaDistr(a=beliefs.a, b=beliefs.b + queries_regions.sum(0))
+            most_anom = BetaDistr(a=beliefs.a + queries_in_regions, b=beliefs.b)
+            lest_anom = BetaDistr(a=beliefs.a, b=beliefs.b + queries_in_regions)
 
             # query most interesting point in the worst case
             scores = np.minimum(self.interest(most_anom), self.interest(lest_anom))
@@ -141,7 +142,7 @@ class BayesianDetector(BaseDetector):
             
             # update the mask and regions onehot 
             mask[queries_idxs[-1]] = False
-            queries_regions[i] = regions[:, queries_idxs[-1]]
+            queries_in_regions += regions_onehot[queries_idxs[-1]]
         return np.array(queries_idxs)
 
     def gather_beliefs(
