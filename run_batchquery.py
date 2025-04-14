@@ -13,13 +13,13 @@ import batch_bald
 def run_sim(
     dataset,
     batch_size,
-    interest_method,
-    batch_query_strategy,
+    strategy,
     seed,
 ):
-    # only run batchbald simulation if interest_method is bald
-    if batch_query_strategy == "batchbald" and interest_method != "bald":
-        return
+    if strategy.startswith("independent") or strategy.startswith("worstcase"):
+        _, interest_method = strategy.split("_")
+    else:
+        interest_method = "bald"
 
     # load dataset
     X, y = odds_datasets.load(dataset)
@@ -48,31 +48,37 @@ def run_sim(
     # run the simulation
     iterations = int(np.floor(len(X_train) / batch_size))
     queriable = np.ones(len(X_train), dtype=bool)
-    for _ in tqdm(
-        range(iterations), f"{dataset}: {interest_method} {batch_query_strategy} bs={batch_size}"
-    ):
+    for _ in tqdm(range(iterations), f"{dataset}: {strategy} bs={batch_size}"):
         # get the queries indices
-        if batch_query_strategy == "independent":
+        if strategy.startswith("independent"):
             idxs = model.get_queries(
                 X=X_train,
                 batch_size=batch_size,
                 independent=True,
                 mask=queriable,
             )
-        elif batch_query_strategy == "worstcase":
+        elif strategy.startswith("worstcase"):
             idxs = model.get_queries(
                 X=X_train,
                 batch_size=batch_size,
                 independent=False,
                 mask=queriable,
             )
-        elif batch_query_strategy == "batchbald":
+        elif strategy == "batchbald":
             idxs = batch_bald.get_queries(
                 model=model,
                 X=X_train,
                 batch_size=batch_size,
                 mask=queriable,
             )
+        elif strategy == "random":
+            idxs = np.random.choice(
+                np.arange(len(X_train))[queriable],
+                batch_size,
+                replace=False,
+            )
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
 
         # update the model with the queried samples
         model.update(X_train[idxs, :], y_train[idxs])
@@ -98,7 +104,7 @@ def run_sim(
 
     # save results
     assert not queriable.any(), "Some points have not been queried"
-    save_dir = f"results/{dataset}/{interest_method}_{batch_query_strategy}/batch_size_{batch_size}"
+    save_dir = f"results/{dataset}/{strategy}/batch_size_{batch_size}"
     if not os.path.exists(save_dir):
         try:  # catch (rare) race conditions in parallel runs
             os.makedirs(save_dir)
@@ -109,17 +115,21 @@ def run_sim(
 
 
 if __name__ == "__main__":
-    Parallel(n_jobs=16)(
+    Parallel(n_jobs=10)(
         delayed(run_sim)(
             dataset=dataset,
             batch_size=batch_size,
-            interest_method=interest_method,
-            batch_query_strategy=batch_query_strategy,
+            strategy=strategy,
             seed=seed,
         )
-        for dataset in odds_datasets.small_datasets_names + odds_datasets.medium_datasets_names
+        for strategy in (
+            ["random"]
+            + ["independent_bald", "worstcase_bald"]
+            + ["independent_margin", "worstcase_margin"]
+            + ["independent_anom", "worstcase_anom"]
+            + ["batchbald"]
+        )
+        for dataset in odds_datasets.datasets_names
         for batch_size in [1, 5, 10]
-        for batch_query_strategy in ["independent", "worstcase", "batchbald"]
-        for interest_method in ["bald", "margin", "anom"]
         for seed in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     )
