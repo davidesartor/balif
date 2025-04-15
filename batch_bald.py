@@ -17,24 +17,26 @@ def get_queries(
         mask = np.ones(X.shape[0], dtype=bool)
     mask = mask.copy()
 
-    # TODO: precompute for all regions and then gather the entropies
-    # for different samples, to avoid computing leaves entropy multiple times
+    # pre-calculate the leaves entropy for each possible leaf-size (0 to batch_size)
+    entropy_leaves = [
+        np.zeros(model.beliefs.a.shape)
+    ]  # 0_th elem never accessed, makes indexing easier
+    for n in range(1, batch_size + 1):
+        A = np.cumprod(model.beliefs.a[..., None] + np.arange(n), axis=-1)
+        B = np.cumprod(model.beliefs.b[..., None] + np.arange(n), axis=-1)
+        A = np.concatenate([np.ones_like(A[..., :1]), A], axis=-1)
+        B = np.concatenate([np.ones_like(B[..., :1]), B], axis=-1)
+        AB = np.prod(model.beliefs.ss()[..., None] + np.arange(n), axis=-1)
+        P = A * B[..., ::-1] / AB[..., None]
+        entropy_leaves.append(-np.sum(comb(n, np.arange(n + 1)) * P * np.log(P), axis=-1))
+    entropy_leaves = np.stack(entropy_leaves, axis=0)  # (batch_size+1, estimators, regions)
 
     # gather the beliefs for each estimator and sample
     regions = model.estimators_apply(X)  # (estimators, samples)
     beliefs = model.gather_beliefs(regions)  # (estimators, samples)
 
-    # pre-calculate the leaves entropy for each possible leaf-size (0 to batch_size)
-    entropy_leaves = [np.zeros(beliefs.a.shape)]  # 0_th elem never accessed, makes indexing easier
-    for n in range(1, batch_size + 1):
-        A = np.cumprod(beliefs.a[..., None] + np.arange(n), axis=-1)
-        B = np.cumprod(beliefs.b[..., None] + np.arange(n), axis=-1)
-        A = np.concatenate([np.ones_like(A[..., :1]), A], axis=-1)
-        B = np.concatenate([np.ones_like(B[..., :1]), B], axis=-1)
-        AB = np.prod(beliefs.ss()[..., None] + np.arange(n), axis=-1)
-        P = A * B[..., ::-1] / AB[..., None]
-        entropy_leaves.append(-np.sum(comb(n, np.arange(n + 1)) * P * np.log(P), axis=-1))
-    entropy_leaves = np.stack(entropy_leaves, axis=0)  # (batch_size+1, estimators, samples)
+    # gather the precomputed entropy for each estimator and sample
+    entropy_leaves = np.take_along_axis(entropy_leaves, regions[None, ...], axis=-1)
 
     # pre-calculate the leaves condtional entropy for leaf-size 1
     a, b, mu = beliefs.a, beliefs.b, beliefs.mu()

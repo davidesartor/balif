@@ -16,11 +16,6 @@ def run_sim(
     strategy,
     seed,
 ):
-    if strategy.startswith("independent") or strategy.startswith("worstcase"):
-        _, interest_method = strategy.split("_")
-    else:
-        interest_method = "bald"
-
     # load dataset
     X, y = odds_datasets.load(dataset)
     contamination = y.mean()
@@ -33,6 +28,7 @@ def run_sim(
     y_train = np.concatenate([y_train] * batch_size, axis=0)
 
     # fit the unsupervised model
+    interest_method = strategy.split("_")[1] if "_" in strategy else "bald"
     model = BAD_IForest(
         interest_method=interest_method,
         contamination=contamination,
@@ -51,32 +47,13 @@ def run_sim(
     for _ in tqdm(range(iterations), f"{dataset}: {strategy} bs={batch_size}"):
         # get the queries indices
         if strategy.startswith("independent"):
-            idxs = model.get_queries(
-                X=X_train,
-                batch_size=batch_size,
-                independent=True,
-                mask=queriable,
-            )
+            idxs = model.get_queries(X_train, batch_size, independent=True, mask=queriable)
         elif strategy.startswith("worstcase"):
-            idxs = model.get_queries(
-                X=X_train,
-                batch_size=batch_size,
-                independent=False,
-                mask=queriable,
-            )
+            idxs = model.get_queries(X_train, batch_size, independent=False, mask=queriable)
         elif strategy == "batchbald":
-            idxs = batch_bald.get_queries(
-                model=model,
-                X=X_train,
-                batch_size=batch_size,
-                mask=queriable,
-            )
+            idxs = batch_bald.get_queries(model, X_train, batch_size, mask=queriable)
         elif strategy == "random":
-            idxs = np.random.choice(
-                np.arange(len(X_train))[queriable],
-                batch_size,
-                replace=False,
-            )
+            idxs = np.random.choice(np.arange(len(X_train))[queriable], batch_size, replace=False)
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -104,32 +81,50 @@ def run_sim(
 
     # save results
     assert not queriable.any(), "Some points have not been queried"
-    save_dir = f"results/{dataset}/{strategy}/batch_size_{batch_size}"
-    if not os.path.exists(save_dir):
-        try:  # catch (rare) race conditions in parallel runs
-            os.makedirs(save_dir)
-        except FileExistsError:
-            pass
-    save_path = f"{save_dir}/seed_{seed}"
-    np.savez_compressed(save_path, avp_train=np.array(avp_train), avp_test=np.array(avp_test))
+    save_dir = f"results/{dataset}/batch_size_{batch_size}/{strategy}"
+    os.makedirs(save_dir, exist_ok=True)
+    np.savez_compressed(
+        f"{save_dir}/seed_{seed}",
+        avp_train=np.array(avp_train),
+        avp_test=np.array(avp_test),
+    )
 
 
 if __name__ == "__main__":
-    Parallel(n_jobs=10)(
+    # sweep config parameters
+    seeds = list(range(10))
+    batch_sizes = [1, 5, 10]
+    strategies = (
+        ["random"]
+        + ["independent_bald", "worstcase_bald"]
+        + ["independent_margin", "worstcase_margin"]
+        + ["independent_anom", "worstcase_anom"]
+        + ["batchbald"]
+    )
+
+    # run the simulations
+    Parallel(n_jobs=48)(
         delayed(run_sim)(
             dataset=dataset,
             batch_size=batch_size,
             strategy=strategy,
             seed=seed,
         )
-        for strategy in (
-            ["random"]
-            + ["independent_bald", "worstcase_bald"]
-            + ["independent_margin", "worstcase_margin"]
-            + ["independent_anom", "worstcase_anom"]
-            + ["batchbald"]
-        )
         for dataset in odds_datasets.datasets_names
-        for batch_size in [1, 5, 10]
-        for seed in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        for strategy in strategies
+        for batch_size in batch_sizes
+        for seed in seeds
     )
+
+    # collect multiple seeds in a single file
+    for i, dataset in enumerate(odds_datasets.datasets_names):
+        for strategy in strategies:
+            for batch_size in batch_sizes:
+                save_dir = f"results/{dataset}/batch_size_{batch_size}/{strategy}"
+                files = [f"{save_dir}/{f}" for f in os.listdir(save_dir)]
+                avp_test = np.stack([np.load(f)["avp_test"] for f in files], axis=-1)
+                avp_train = np.stack([np.load(f)["avp_train"] for f in files], axis=-1)
+                np.savez_compressed(save_dir, avp_test=avp_test, avp_train=avp_train)
+                for f in files:
+                    os.remove(f)
+                os.rmdir(save_dir)
