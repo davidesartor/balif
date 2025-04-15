@@ -18,6 +18,7 @@ class BetaDistr(NamedTuple):
         return self.a + self.b
 
     def mode(self):
+        return (self.a - 1) / (self.a + self.b - 2)
         return np.where(
             np.minimum(self.a, self.b) > 1,
             (self.a - 1) / (self.a + self.b - 2),

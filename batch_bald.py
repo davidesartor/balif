@@ -16,10 +16,7 @@ def get_queries(
     if mask is None:
         mask = np.ones(X.shape[0], dtype=bool)
     mask = mask.copy()
-
-    # TODO: precompute for all regions and then gather the entropies
-    # for different samples, to avoid computing leaves entropy multiple times
-
+    
     # gather the beliefs for each estimator and sample
     regions = model.estimators_apply(X)  # (estimators, samples)
     beliefs = model.gather_beliefs(regions)  # (estimators, samples)

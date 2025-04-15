@@ -115,13 +115,14 @@ def run_sim(
 
 
 if __name__ == "__main__":
-    Parallel(n_jobs=10)(
+    Parallel(n_jobs=48)(
         delayed(run_sim)(
             dataset=dataset,
             batch_size=batch_size,
             strategy=strategy,
             seed=seed,
         )
+        for dataset in odds_datasets.datasets_names
         for strategy in (
             ["random"]
             + ["independent_bald", "worstcase_bald"]
@@ -129,7 +130,6 @@ if __name__ == "__main__":
             + ["independent_anom", "worstcase_anom"]
             + ["batchbald"]
         )
-        for dataset in odds_datasets.datasets_names
-        for batch_size in [1, 5, 10]
+        for batch_size in [10]
         for seed in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     )
