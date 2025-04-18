@@ -6,8 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
 
 import odds_datasets
-from iforest import BAD_IForest
-import batch_bald
+import balif
 
 
 def run_sim(
@@ -28,9 +27,7 @@ def run_sim(
     y_train = np.concatenate([y_train] * batch_size, axis=0)
 
     # fit the unsupervised model
-    interest_method = strategy.split("_")[1] if "_" in strategy else "bald"
-    model = BAD_IForest(
-        interest_method=interest_method,
+    model = balif.BADIForest(
         contamination=contamination,
         random_state=seed,
     ).fit(X_train)
@@ -47,13 +44,36 @@ def run_sim(
     for _ in tqdm(range(iterations), f"{dataset}: {strategy} bs={batch_size}"):
         # get the queries indices
         if strategy.startswith("independent"):
-            idxs = model.get_queries(X_train, batch_size, independent=True, mask=queriable)
+            _, interest_method = strategy.split("_")
+            idxs = balif.active_learning.get_queries_independent(
+                model=model,
+                X=X_train,
+                interest_method=interest_method,  # type: ignore
+                batch_size=batch_size,
+                mask=queriable,
+            )
         elif strategy.startswith("worstcase"):
-            idxs = model.get_queries(X_train, batch_size, independent=False, mask=queriable)
+            _, interest_method = strategy.split("_")
+            idxs = balif.active_learning.get_queries_worstcase(
+                model=model,
+                X=X_train,
+                interest_method=interest_method,  # type: ignore
+                batch_size=batch_size,
+                mask=queriable,
+            )
         elif strategy == "batchbald":
-            idxs = batch_bald.get_queries(model, X_train, batch_size, mask=queriable)
+            idxs = balif.active_learning.get_queries_batchbald(
+                model=model,
+                X=X_train,
+                batch_size=batch_size,
+                mask=queriable,
+            )
         elif strategy == "random":
-            idxs = np.random.choice(np.arange(len(X_train))[queriable], batch_size, replace=False)
+            idxs = np.random.choice(
+                a=np.arange(len(X_train))[queriable],
+                size=batch_size,
+                replace=False,
+            )
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -81,7 +101,8 @@ def run_sim(
 
     # save results
     assert not queriable.any(), "Some points have not been queried"
-    save_dir = f"results/{dataset}/batch_size_{batch_size}/{strategy}"
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    save_dir = os.path.join(file_dir, "results", dataset, f"batch_size_{batch_size}", strategy)
     os.makedirs(save_dir, exist_ok=True)
     np.savez_compressed(
         f"{save_dir}/seed_{seed}",
@@ -120,7 +141,10 @@ if __name__ == "__main__":
     for i, dataset in enumerate(odds_datasets.datasets_names):
         for strategy in strategies:
             for batch_size in batch_sizes:
-                save_dir = f"results/{dataset}/batch_size_{batch_size}/{strategy}"
+                file_dir = os.path.dirname(os.path.abspath(__file__))
+                save_dir = os.path.join(
+                    file_dir, "results", dataset, f"batch_size_{batch_size}", strategy
+                )
                 files = [f"{save_dir}/{f}" for f in os.listdir(save_dir)]
                 avp_test = np.stack([np.load(f)["avp_test"] for f in files], axis=-1)
                 avp_train = np.stack([np.load(f)["avp_train"] for f in files], axis=-1)
