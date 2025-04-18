@@ -131,14 +131,14 @@ if __name__ == "__main__":
             strategy=strategy,
             seed=seed,
         )
-        for dataset in odds_datasets.small_datasets_names
+        for dataset in odds_datasets.datasets_names
         for strategy in strategies
         for batch_size in batch_sizes
         for seed in seeds
     )
 
     # collect multiple seeds in a single file
-    for i, dataset in enumerate(odds_datasets.small_datasets_names):
+    for i, dataset in enumerate(odds_datasets.datasets_names):
         for strategy in strategies:
             for batch_size in batch_sizes:
                 file_dir = os.path.dirname(os.path.abspath(__file__))

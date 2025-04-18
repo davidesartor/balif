@@ -1,0 +1,20 @@
+[project]
+name = "balif"
+version = "0.1.0"
+description = "Bayesian Active Learning Isolation Forest"
+authors = [
+    {name = "davidesartor", email = "davide.sartor.4@studenti.unipd.it"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyod (>=2.0.4,<3.0.0)",
+    "jaxtyping (>=0.3.1,<0.4.0)",
+    "tqdm (>=4.67.1,<5.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

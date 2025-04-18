@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import odds_datasets
 
 if __name__ == "__main__":
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+
     # compare worstcase and batchbald
     for batch_size in [10, 5, 1]:
         plt.figure(figsize=(8, 12))
@@ -26,24 +28,19 @@ if __name__ == "__main__":
                     plt.plot([], [], label=label, color=color, linestyle=linestyle)
                 else:
                     # load simulation data
-                    try:  # if simulation data is not available, skip
-                        sim = np.load(f"results/{dataset}/batch_size_{batch_size}/{strategy}.npz")[
-                            "avp_test"
-                        ]
+                    sim_file = os.path.join(
+                        file_dir, "results", dataset, f"batch_size_{batch_size}", strategy
+                    )
+                    sim = np.load(f"{sim_file}.npz")["avp_test"]
 
-                        x = np.linspace(0, 100, len(sim), endpoint=True)
-                        value = sim.mean(-1)
-                        lb = value - sim.std(-1) * 1.96 / np.sqrt(sim.shape[-1])
-                        ub = value + sim.std(-1) * 1.96 / np.sqrt(sim.shape[-1])
+                    x = np.linspace(0, 100, len(sim), endpoint=True)
+                    value = sim.mean(-1)
+                    lb = value - sim.std(-1) * 1.96 / np.sqrt(sim.shape[-1])
+                    ub = value + sim.std(-1) * 1.96 / np.sqrt(sim.shape[-1])
 
-                        # plot simulation data
-                        plt.plot(x + 1, value, label=label, color=color, linestyle=linestyle)
-                        plt.fill_between(
-                            x + 1, lb.clip(0, 1), ub.clip(0, 1), alpha=0.1, color=color
-                        )
-                    except FileNotFoundError as e:
-                        print(f"File not found: {e}")
-                        pass
+                    # plot simulation data
+                    plt.plot(x + 1, value, label=label, color=color, linestyle=linestyle)
+                    plt.fill_between(x + 1, lb.clip(0, 1), ub.clip(0, 1), alpha=0.1, color=color)
 
                 if dataset == "legend":
                     plt.legend(loc="center", fontsize=12, frameon=False)
@@ -61,7 +58,6 @@ if __name__ == "__main__":
                         plt.xlabel("Labelling Budget")
 
         plt.tight_layout()
-        file_dir = os.path.dirname(os.path.abspath(__file__))
         save_dir = os.path.join(file_dir, "figures")
         save_path = os.path.join(save_dir, f"ablation_variants_{batch_size}.pdf")
         os.makedirs(save_dir, exist_ok=True)
