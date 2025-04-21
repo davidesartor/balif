@@ -1,18 +1,22 @@
 [project]
 name = "balif"
-version = "0.1.0"
+version = "0.4.0"
 description = "Bayesian Active Learning Isolation Forest"
 authors = [
     {name = "davidesartor", email = "davide.sartor.4@studenti.unipd.it"}
 ]
-license = {text = "MIT"}
+license = "MIT"
 readme = "README.md"
-requires-python = ">=3.10, <=3.12"
+requires-python = ">=3.10, <3.13"
 dependencies = [
     "ipykernel>=6.29.5",
     "jaxtyping>=0.3.1",
     "pyod>=2.0.4",
+    "tqdm>=4.67.1",
 ]
 
 [tool.setuptools]
-packages = {find = {include = ["balif", "odds_datasets"]}}
+packages = {find = {include = ["balif", "balif.*"]}}
+
+[tool.setuptools.package-data]
+"balif.odds_datasets" = ["*.mat"]

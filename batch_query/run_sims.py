@@ -4,9 +4,7 @@ import os
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
-
-import odds_datasets
-import balif
+from balif import BADIForest, odds_datasets, active_learning
 
 
 def run_sim(
@@ -27,7 +25,7 @@ def run_sim(
     y_train = np.concatenate([y_train] * batch_size, axis=0)
 
     # fit the unsupervised model
-    model = balif.BADIForest(
+    model = BADIForest(
         contamination=contamination,
         random_state=seed,
     ).fit(X_train)
@@ -45,7 +43,7 @@ def run_sim(
         # get the queries indices
         if strategy.startswith("independent"):
             _, interest_method = strategy.split("_")
-            idxs = balif.active_learning.get_queries_independent(
+            idxs = active_learning.get_queries_independent(
                 model=model,
                 X=X_train,
                 interest_method=interest_method,  # type: ignore
@@ -54,7 +52,7 @@ def run_sim(
             )
         elif strategy.startswith("worstcase"):
             _, interest_method = strategy.split("_")
-            idxs = balif.active_learning.get_queries_worstcase(
+            idxs = active_learning.get_queries_worstcase(
                 model=model,
                 X=X_train,
                 interest_method=interest_method,  # type: ignore
@@ -62,7 +60,7 @@ def run_sim(
                 mask=queriable,
             )
         elif strategy == "batchbald":
-            idxs = balif.active_learning.get_queries_batchbald(
+            idxs = active_learning.get_queries_batchbald(
                 model=model,
                 X=X_train,
                 batch_size=batch_size,

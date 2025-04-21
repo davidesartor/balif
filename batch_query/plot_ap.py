@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-import odds_datasets
+from balif import odds_datasets
 
 if __name__ == "__main__":
     file_dir = os.path.dirname(os.path.abspath(__file__))

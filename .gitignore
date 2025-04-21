@@ -1,6 +1,14 @@
-__pycache__
-*.pyc
-.venv
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
 *.egg-info
-results
-figures
+
+# Virtual environments
+.venv
+
+# Project files
+results/
+figures/

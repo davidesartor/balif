@@ -9,7 +9,7 @@ class BADIForest(BayesianDetector, IForest):
     def estimators_apply(
         self, X: Float[np.ndarray, "samples features"]
     ) -> Int[np.ndarray, "estimators samples"]:
-        regions = [est.apply(X, check_input=False) for est in self.estimators_]
+        regions = [est.apply(X) for est in self.estimators_]
         return np.stack(regions, axis=0)
 
     @property

@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import os 
-import balif
+from balif import active_learning, BetaDistr
 
 
 if __name__ == "__main__":
@@ -15,8 +15,8 @@ if __name__ == "__main__":
     plt.figure(figsize=(15, 4))
     for i, method in enumerate(["bald", "margin", "anom"]):
         plt.subplot(1, 3, i + 1)
-        beliefs = balif.BetaDistr(a=A, b=B)
-        scores = balif.interest(beliefs, method) # type: ignore
+        beliefs = BetaDistr(a=A, b=B)
+        scores = active_learning.interest(beliefs, method) # type: ignore
         plt.contourf(A, B, scores, levels=20, cmap="viridis")
         plt.colorbar()
 
@@ -46,15 +46,15 @@ if __name__ == "__main__":
             mu = np.linspace(0, 1, 100)
             ss = a0 + b0 + d
             a, b = ss * mu, ss * (1 - mu)
-            beliefs = balif.BetaDistr(a=a, b=b)
-            scores = balif.interest(beliefs, method) # type: ignore
+            beliefs = BetaDistr(a=a, b=b)
+            scores = active_learning.interest(beliefs, method) # type: ignore
             plt.plot(mu, scores, "r:")
 
             a = a0 + np.arange(d + 1)
             b = b0 + np.arange(d + 1)[::-1]
             mu = a / (a + b)
-            beliefs = balif.BetaDistr(a=a, b=b)
-            scores = balif.interest(beliefs, method) # type: ignore
+            beliefs = BetaDistr(a=a, b=b)
+            scores = active_learning.interest(beliefs, method) # type: ignore
             axins.plot(mu, scores, "r-", linewidth=3)
             break
 
