@@ -8,7 +8,7 @@ if __name__ == "__main__":
 
     # compare worstcase and batchbald
     for batch_size in [10, 5, 1]:
-        plt.figure(figsize=(8, 12))
+        plt.figure(figsize=(10, 12))
         for i, dataset in enumerate(
             odds_datasets.small_datasets_names
             + odds_datasets.medium_datasets_names
@@ -17,12 +17,12 @@ if __name__ == "__main__":
         ):
             plt.subplot(6, 3, i + 1)
             for strategy, label, color, linestyle in [
-                ("worstcase_bald", "bald worstcase", "tab:blue", "-"),
-                ("independent_bald", "bald independent", "tab:blue", ":"),
-                ("worstcase_margin", "margin worstcase", "tab:orange", "-"),
-                ("independent_margin", "margin independent", "tab:orange", ":"),
-                ("batchbald", "batchbald", "tab:green", "-"),
-                ("random", "random", "black", ":"),
+                ("worstcase_bald", "BALD worst-case", "tab:blue", "-"),
+                ("independent_bald", "BALD top-k", "tab:blue", ":"),
+                ("worstcase_margin", "MARGIN worst-case", "tab:orange", "-"),
+                ("independent_margin", "MARGIN top-k", "tab:orange", ":"),
+                ("batchbald", "BatchBALD", "tab:green", "-"),
+                ("random", "RANDOM", "black", ":"),
             ]:
                 if dataset == "legend":
                     plt.plot([], [], label=label, color=color, linestyle=linestyle)
@@ -43,7 +43,7 @@ if __name__ == "__main__":
                     plt.fill_between(x + 1, lb.clip(0, 1), ub.clip(0, 1), alpha=0.1, color=color)
 
                 if dataset == "legend":
-                    plt.legend(loc="center", fontsize=12, frameon=False)
+                    plt.legend(loc="center", fontsize=10, frameon=False)
                     plt.axis("off")
                 else:
                     plt.title(f"{dataset}")
